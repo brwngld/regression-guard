@@ -38,10 +38,10 @@ export function applyPolicy(
   overrides: Partial<Record<FindingClass, PolicyAction>> = {},
 ): GateDecision {
   const policy = { ...DEFAULT_POLICY, ...overrides }
-  const triggered = findings.map((finding) => {
-    const action = (policy as Record<string, PolicyAction | undefined>)[finding.findingClass]
-    return action ?? 'warn'
-  })
+  const actionFor = (finding: Finding): PolicyAction =>
+    (policy as Record<string, PolicyAction | undefined>)[finding.findingClass] ?? 'warn'
+
+  const triggered = findings.map(actionFor)
 
   const worst = triggered.reduce<PolicyAction>(
     (current, action) => (ACTION_RANK[action] > ACTION_RANK[current] ? action : current),
@@ -52,5 +52,11 @@ export function applyPolicy(
     (left, right) => ACTION_RANK[right] - ACTION_RANK[left],
   )
 
-  return { verdict: ACTION_TO_VERDICT[worst], triggeredActions }
+  // Worst policy action first; stable within the same action so finding ids
+  // keep their generation order.
+  const orderedFindings = [...findings].sort(
+    (left, right) => ACTION_RANK[actionFor(right)] - ACTION_RANK[actionFor(left)],
+  )
+
+  return { verdict: ACTION_TO_VERDICT[worst], triggeredActions, findings: orderedFindings }
 }

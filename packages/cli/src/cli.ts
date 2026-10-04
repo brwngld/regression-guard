@@ -16,6 +16,7 @@ const VERDICT_COLOR: Record<Verdict, (text: string) => string> = {
 const CONTRACT_TEMPLATE = `# Regression Guard change contract.
 # The verifier checks every change between two refs against this file.
 # Docs: docs/architecture.md
+version: 1
 id: my-change
 goal: Describe the intended outcome of this change in one sentence.
 
@@ -105,7 +106,10 @@ program
         process.stdout.write(`${body}\n`)
       }
 
-      const verdictLine = `regression-guard: ${report.verdict} — accomplished: ${report.threeQuestions.accomplished}, in-scope: ${report.threeQuestions.withinScope}, regressions: not-verified (M2)`
+      const regressions = report.threeQuestions.regressions
+      const regressionsLabel =
+        regressions.status === 'not-verified' ? 'not-verified (M2)' : regressions.status
+      const verdictLine = `regression-guard: ${report.verdict} — accomplished: ${report.threeQuestions.accomplished}, in-scope: ${report.threeQuestions.withinScope}, regressions: ${regressionsLabel}`
       process.stderr.write(`${VERDICT_COLOR[report.verdict](verdictLine)}\n`)
 
       process.exitCode = report.verdict === 'ACCEPT' || report.verdict === 'WARN' ? 0 : 1

@@ -26,6 +26,19 @@ function severityMark(severity: string): string {
   }
 }
 
+function regressionsLine(status: VerificationReport['threeQuestions']['regressions']): string {
+  switch (status.status) {
+    case 'not-verified':
+      return 'NOT VERIFIED — requires the Baseline Engine (milestone 2)'
+    case 'pass':
+      return `PASS — ${status.baselineTests ?? 0} baseline tests compared`
+    case 'fail':
+      return `FAIL — ${status.regressionsFound ?? 0} regression(s) of ${status.baselineTests ?? 0} baseline tests`
+    case 'partial':
+      return `PARTIAL — baseline incomplete (${status.regressionsFound ?? 0} regression(s) found)`
+  }
+}
+
 export function renderMarkdownReport(report: VerificationReport): string {
   const lines: string[] = []
   const push = (...text: string[]) => lines.push(...text)
@@ -40,7 +53,7 @@ export function renderMarkdownReport(report: VerificationReport): string {
   push('### The three questions', '')
   push(`1. **Requested change accomplished?** ${report.threeQuestions.accomplished}`)
   push(`2. **Within permitted scope?** ${report.threeQuestions.withinScope}`)
-  push(`3. **No regressions introduced?** NOT VERIFIED — requires the Baseline Engine (milestone 2)`)
+  push(`3. **No regressions introduced?** ${regressionsLine(report.threeQuestions.regressions)}`)
   push('')
 
   push('### Scope assessment ("should this have changed?")', '')

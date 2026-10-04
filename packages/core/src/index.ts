@@ -9,6 +9,7 @@ export {
   ContractPathsSchema,
   ChangeContractSchema,
   ContractValidationError,
+  CONTRACT_SCHEMA_VERSION,
   parseContract,
 } from './schema/contract'
 export type {
@@ -45,18 +46,25 @@ export {
 } from './schema/scope'
 export type { ScopeClassification, PathAssessment, ScopeAssessment } from './schema/scope'
 
-export { EvidenceSchema, FindingSchema, severityForClass } from './schema/evidence'
-export type { Evidence, Finding } from './schema/evidence'
+export { EvidenceSchema, EvidenceKindSchema, FindingSchema, severityForClass } from './schema/evidence'
+export type { Evidence, EvidenceKind, Finding } from './schema/evidence'
 
 export { VerdictSchema, GateDecisionSchema } from './schema/gate'
 export type { Verdict, GateDecision } from './schema/gate'
 
 export {
   ThreeQuestionsSchema,
+  RegressionStatusSchema,
   ReportStatisticsSchema,
   VerificationReportSchema,
+  REPORT_SCHEMA_VERSION,
 } from './schema/report'
-export type { ThreeQuestions, ReportStatistics, VerificationReport } from './schema/report'
+export type {
+  ThreeQuestions,
+  RegressionStatus,
+  ReportStatistics,
+  VerificationReport,
+} from './schema/report'
 
 export { GitError } from './vcs/exec'
 export { GitAdapter } from './vcs/git'

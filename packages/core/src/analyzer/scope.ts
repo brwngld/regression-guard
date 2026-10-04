@@ -160,6 +160,7 @@ function diffEvidence(
   observation: string,
 ): Evidence {
   return {
+    kind: 'diff',
     claim,
     observation,
     changedLines:
@@ -363,6 +364,7 @@ export function analyzeScope(
       `New dependencies introduced: ${added.map((dep) => `${dep.name}@${dep.version ?? '?'} (${dep.section})`).join(', ')}.`,
       ['package.json'],
       {
+        kind: 'dependency',
         claim: 'The change introduces dependencies that were not present before.',
         observation: `Added: ${added.map((dep) => `${dep.name}@${dep.version ?? '?'}`).join(', ')}.`,
         changedLines: [],
@@ -376,6 +378,7 @@ export function analyzeScope(
       `Dependencies removed: ${removed.map((dep) => `${dep.name} (${dep.section})`).join(', ')}.`,
       ['package.json'],
       {
+        kind: 'dependency',
         claim: 'The change removes dependencies that were present before.',
         observation: `Removed: ${removed.map((dep) => dep.name).join(', ')}.`,
         changedLines: [],
@@ -389,6 +392,7 @@ export function analyzeScope(
       `Dependency versions changed: ${changed.map((dep) => `${dep.name} ${dep.from} -> ${dep.to}`).join(', ')}.`,
       ['package.json'],
       {
+        kind: 'dependency',
         claim: 'The change updates dependency versions.',
         observation: `Changed: ${changed.map((dep) => `${dep.name} ${dep.from} -> ${dep.to}`).join(', ')}.`,
         changedLines: [],
@@ -411,6 +415,7 @@ export function analyzeScope(
         `The contract requires changes under ${rule}, but no changed path matches it.`,
         [],
         {
+          kind: 'diff',
           claim: `The requested change appears unaccomplished: must-change area ${rule} was not touched.`,
           observation: `No path in the diff between ${enriched.changeSet.before} and ${enriched.changeSet.after} matches ${rule}.`,
           changedLines: [],

@@ -58,7 +58,12 @@ export const ContractPathsSchema = z.object({
   prohibited: z.array(PathRuleSchema).default([]),
 })
 
+/** Contracts carry an explicit schema version so future format changes are detectable. */
+export const CONTRACT_SCHEMA_VERSION = 1
+
 export const ChangeContractSchema = z.object({
+  /** Defaults to 1 so contracts written before versioning still parse. */
+  version: z.literal(CONTRACT_SCHEMA_VERSION).default(CONTRACT_SCHEMA_VERSION),
   id: z.string().min(1),
   goal: z.string().min(1),
   paths: ContractPathsSchema.default(() => ({

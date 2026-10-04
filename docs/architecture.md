@@ -185,7 +185,11 @@ rather than:
 Code → LLM → Opinion
 ```
 
-No finding leaves the engine without evidence and a reproduction command.
+No finding leaves the engine without evidence and a reproduction command. Both
+`ChangeContract` and `VerificationReport` carry explicit schema versions
+(`version: 1` / `schemaVersion: 1`), and every evidence object declares its
+kind (`diff`, `dependency`, later `test`/`runtime`/`browser`/`api`) so later
+milestones extend the model instead of replacing it.
 
 ## The gate
 

@@ -7,6 +7,7 @@ import { buildGraph } from './intel/graph'
 import { applyPolicy } from './gate/policy'
 import { renderMarkdownReport } from './report/markdown'
 import type { ChangeContract, FindingClass, PolicyAction } from './schema/contract'
+import { REPORT_SCHEMA_VERSION } from './schema/report'
 import type { VerificationReport } from './schema/report'
 import { GitAdapter } from './vcs/git'
 
@@ -81,6 +82,7 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
     assessment.perPath.filter((item) => item.classification === classification).length
 
   const report: VerificationReport = {
+    schemaVersion: REPORT_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     contractId: contract.id,
     goal: contract.goal,
@@ -89,11 +91,11 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
     after: input.after,
     beforeSha: changeSet.beforeSha,
     afterSha: changeSet.afterSha,
-    threeQuestions: { accomplished, withinScope, regressions: 'not-verified' },
+    threeQuestions: { accomplished, withinScope, regressions: { status: 'not-verified' } },
     verdict: gate.verdict,
     triggeredActions: gate.triggeredActions,
     perPath: assessment.perPath,
-    findings,
+    findings: gate.findings,
     statistics: {
       filesChanged: assessment.perPath.length,
       expected: count('EXPECTED'),

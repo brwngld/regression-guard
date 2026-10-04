@@ -68,8 +68,9 @@ describe('verifyChange end-to-end', () => {
     expect(report.threeQuestions).toEqual({
       accomplished: 'yes',
       withinScope: 'yes',
-      regressions: 'not-verified',
+      regressions: { status: 'not-verified' },
     })
+    expect(report.schemaVersion).toBe(1)
     expect(report.statistics).toMatchObject({ filesChanged: 1, expected: 1 })
     expect(report.findings).toEqual([])
     expect(report.markdown).toContain('## Verdict: ACCEPT')

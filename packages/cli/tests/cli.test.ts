@@ -138,9 +138,17 @@ describe('regression-guard CLI (end-to-end)', () => {
     )
 
     expect(result.code).toBe(1)
-    const parsed = JSON.parse(result.stdout) as { verdict: string; findings: { findingClass: string }[] }
+    const parsed = JSON.parse(result.stdout) as {
+      schemaVersion: number
+      verdict: string
+      threeQuestions: { regressions: { status: string } }
+      findings: { findingClass: string; evidence: { kind: string } }[]
+    }
+    expect(parsed.schemaVersion).toBe(1)
     expect(parsed.verdict).toBe('REJECT')
+    expect(parsed.threeQuestions.regressions.status).toBe('not-verified')
     expect(parsed.findings.map((finding) => finding.findingClass)).toContain('preserved-area-changed')
+    expect(parsed.findings.every((finding) => ['diff', 'dependency'].includes(finding.evidence.kind))).toBe(true)
   })
 
   it('writes the report to a file with --out', async () => {

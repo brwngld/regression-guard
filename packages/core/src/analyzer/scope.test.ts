@@ -193,15 +193,78 @@ describe('analyzeScope classification', () => {
     ])
   })
 
-  it('attaches evidence with a reproduction command to every finding', () => {
+  it('attaches evidence with a kind and reproduction command to every finding', () => {
     const result = analyzeScope(
       contractOf({ mustChange: ['src/style.css'], mustPreserve: ['src/tasks.js'] }),
       enriched([record({ path: 'src/tasks.js' })]),
       GRAPH,
     )
     const finding = result.findings[0]
+    expect(finding?.evidence.kind).toBe('diff')
     expect(finding?.evidence.reproduction).toBe('git -C <repo> diff main feature -- src/tasks.js')
     expect(finding?.evidence.claim).toContain('must-preserve')
     expect(finding?.evidence.changedLines[0]?.file).toBe('src/tasks.js')
+  })
+
+  it('marks dependency findings with dependency evidence kind', () => {
+    const result = analyzeScope(
+      contractOf({ mustChange: ['src/style.css'] }),
+      enriched([record({ path: 'src/style.css' }), record({ path: 'package.json' })], {
+        added: [{ name: 'leftpad', section: 'dependencies', version: '^1.0.0' }],
+        removed: [],
+        changed: [],
+      }),
+      GRAPH,
+    )
+    const dep = result.findings.find((finding) => finding.findingClass === 'new-dependency')
+    expect(dep?.evidence.kind).toBe('dependency')
+  })
+})
+
+describe('adjacency lock-down (must not become authorization propagation)', () => {
+  // A imports B, B imports C — a strictly linear chain.
+  const CHAIN: DependencyGraph = {
+    files: {
+      'src/A.js': { path: 'src/A.js', kind: 'source', imports: ['src/B.js'], externalImports: [] },
+      'src/B.js': { path: 'src/B.js', kind: 'source', imports: ['src/C.js'], externalImports: [] },
+      'src/C.js': { path: 'src/C.js', kind: 'source', imports: [], externalImports: [] },
+    },
+    importedBy: {
+      'src/B.js': ['src/A.js'],
+      'src/C.js': ['src/B.js'],
+    },
+  }
+
+  const CHANGED = ['src/A.js', 'src/B.js', 'src/C.js'].map((path) => record({ path }))
+
+  it('RELATED is one-hop and non-transitive: A→B→C stays EXPECTED/RELATED/OUT_OF_SCOPE', () => {
+    const result = analyzeScope(contractOf({ mustChange: ['src/A.js'] }), enriched(CHANGED), CHAIN)
+    expect(result.assessment.perPath.map((item) => [item.path, item.classification])).toEqual([
+      ['src/A.js', 'EXPECTED'],
+      ['src/B.js', 'RELATED'],
+      ['src/C.js', 'OUT_OF_SCOPE'],
+    ])
+  })
+
+  it('graph adjacency can never override mustPreserve', () => {
+    const result = analyzeScope(
+      contractOf({ mustChange: ['src/A.js'], mustPreserve: ['src/C.js'] }),
+      enriched(CHANGED),
+      CHAIN,
+    )
+    const byPath = new Map(result.assessment.perPath.map((item) => [item.path, item.classification]))
+    expect(byPath.get('src/B.js')).toBe('RELATED')
+    expect(byPath.get('src/C.js')).toBe('SUSPICIOUS')
+  })
+
+  it('graph adjacency can never override prohibited', () => {
+    const result = analyzeScope(
+      contractOf({ mustChange: ['src/A.js'], prohibited: ['src/C.js'] }),
+      enriched(CHANGED),
+      CHAIN,
+    )
+    const byPath = new Map(result.assessment.perPath.map((item) => [item.path, item.classification]))
+    expect(byPath.get('src/B.js')).toBe('RELATED')
+    expect(byPath.get('src/C.js')).toBe('PROHIBITED')
   })
 })
