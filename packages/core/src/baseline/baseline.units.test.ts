@@ -149,6 +149,20 @@ describe('parseRunnerJson', () => {
     expect(outcomes?.map((outcome) => outcome.status)).toEqual(['skipped', 'todo', 'unknown'])
   })
 
+  it('normalizes Windows separators in suite file names', () => {
+    const outcomes = parseRunnerJson(
+      JSON.stringify({
+        testResults: [
+          {
+            name: 'C:\\repo\\wt\\tests\\app.test.ts',
+            assertionResults: [{ fullName: 'a', title: 'a', status: 'passed', failureMessages: [] }],
+          },
+        ],
+      }),
+    )
+    expect(outcomes?.[0]?.file).toBe('C:/repo/wt/tests/app.test.ts')
+  })
+
   it('returns null for non-matching payloads', () => {
     expect(parseRunnerJson('not json')).toBeNull()
     expect(parseRunnerJson('{"success":true}')).toBeNull()

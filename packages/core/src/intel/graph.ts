@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Project, SyntaxKind, type StringLiteral } from 'ts-morph'
+import type { UnresolvedEdge } from '../schema/impact'
 import type { GitAdapter } from '../vcs/git'
 import { isRelativeSpecifier, packageNameOf, resolveSpecifier } from './resolve'
 
@@ -19,6 +20,15 @@ export interface DependencyGraph {
   files: Record<string, FileNode>
   /** Reverse edges: path -> paths that import it. */
   importedBy: Record<string, string[]>
+  /**
+   * Relationships the graph cannot resolve statically: relative specifiers
+   * with no target among the listed paths, and computed dynamic import()
+   * calls. These are boundaries, not guesses — no nodes are fabricated for
+   * them. buildGraph always populates this list, deterministically sorted by
+   * (from, specifier, kind); the field is optional only so hand-assembled
+   * graphs (e.g. in tests) remain valid literals.
+   */
+  unresolvedEdges?: UnresolvedEdge[]
 }
 
 const PARSE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx'])
@@ -85,13 +95,24 @@ function packageEntryPaths(content: string): string[] {
   return entries
 }
 
-/** Parse imports out of one JS/TS file's content using ts-morph (in-memory). */
-export function collectJsImports(content: string): { relative: string[]; external: string[] } {
+/**
+ * Parse imports out of one JS/TS file's content using ts-morph (in-memory).
+ * `relative`/`external` hold statically classifiable specifiers (deduplicated);
+ * `computedDynamicImports` counts dynamic import() calls whose first argument
+ * is not a string literal (e.g. `await import(moduleName)`) — their targets
+ * are decided at runtime and cannot be resolved statically.
+ */
+export function collectJsImports(content: string): {
+  relative: string[]
+  external: string[]
+  computedDynamicImports: number
+} {
   const project = new Project({ useInMemoryFileSystem: true, skipAddingFilesFromTsConfig: true })
   const sourceFile = project.createSourceFile('/virtual.js', content, { overwrite: true })
 
   const relative: string[] = []
   const external: string[] = []
+  let computedDynamicImports = 0
 
   for (const declaration of sourceFile.getImportDeclarations()) {
     const specifier = declaration.getModuleSpecifierValue()
@@ -122,19 +143,26 @@ export function collectJsImports(content: string): { relative: string[]; externa
       continue
     }
     const argument = call.getArguments()[0]
-    if (argument && argument.getKind() === SyntaxKind.StringLiteral) {
+    if (!argument) {
+      continue
+    }
+    if (argument.getKind() === SyntaxKind.StringLiteral) {
       const specifier = (argument as StringLiteral).getLiteralText()
       if (isRelativeSpecifier(specifier)) {
         relative.push(specifier)
       } else {
         external.push(packageNameOf(specifier))
       }
+    } else {
+      // import(<non-string>) — computed at runtime, not statically resolvable.
+      computedDynamicImports += 1
     }
   }
 
   return {
     relative: [...new Set(relative)],
     external: [...new Set(external)],
+    computedDynamicImports,
   }
 }
 
@@ -171,15 +199,34 @@ export function workingTreeReader(git: GitAdapter): RepoReader {
   }
 }
 
+function compareUnresolvedEdges(a: UnresolvedEdge, b: UnresolvedEdge): number {
+  if (a.from !== b.from) {
+    return a.from < b.from ? -1 : 1
+  }
+  if (a.specifier !== b.specifier) {
+    return a.specifier < b.specifier ? -1 : 1
+  }
+  if (a.kind !== b.kind) {
+    return a.kind < b.kind ? -1 : 1
+  }
+  return 0
+}
+
 /**
  * Build the repository intelligence graph over a snapshot: file nodes, import
  * edges, and reverse (importedBy) edges. node_modules and build output are
  * invisible by construction (git-tracked or gitignored files only).
+ * Relationships that cannot be resolved statically — unresolvable relative
+ * imports and computed dynamic import() calls — are surfaced as
+ * `unresolvedEdges` (deterministically ordered by from, specifier, kind)
+ * rather than silently dropped. No nodes or guessed targets are created for
+ * them: they are boundaries of what the graph honestly knows.
  */
 export async function buildGraph(reader: RepoReader): Promise<DependencyGraph> {
   const paths = await reader.listFiles()
   const existing = new Set(paths)
   const files: Record<string, FileNode> = {}
+  const unresolvedEdges: UnresolvedEdge[] = []
 
   const ensureNode = (path: string): FileNode => {
     let node = files[path]
@@ -196,11 +243,21 @@ export async function buildGraph(reader: RepoReader): Promise<DependencyGraph> {
     if (PARSE_EXTENSIONS.has(path.slice(path.lastIndexOf('.')))) {
       const content = await reader.readFile(path)
       if (content !== null) {
-        const { relative, external } = collectJsImports(content)
-        node.imports = relative
-          .map((specifier) => resolveSpecifier(path, specifier, existing))
-          .filter((resolved): resolved is string => resolved !== null)
+        const { relative, external, computedDynamicImports } = collectJsImports(content)
+        const imports: string[] = []
+        for (const specifier of relative) {
+          const resolved = resolveSpecifier(path, specifier, existing)
+          if (resolved === null) {
+            unresolvedEdges.push({ from: path, specifier, kind: 'unresolved-import' })
+          } else {
+            imports.push(resolved)
+          }
+        }
+        node.imports = imports
         node.externalImports = external
+        if (computedDynamicImports > 0) {
+          unresolvedEdges.push({ from: path, specifier: '(computed)', kind: 'dynamic-import' })
+        }
       }
       continue
     }
@@ -240,5 +297,5 @@ export async function buildGraph(reader: RepoReader): Promise<DependencyGraph> {
     }
   }
 
-  return { files, importedBy }
+  return { files, importedBy, unresolvedEdges: unresolvedEdges.sort(compareUnresolvedEdges) }
 }

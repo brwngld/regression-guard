@@ -66,6 +66,31 @@ export type {
   VerificationReport,
 } from './schema/report'
 
+export {
+  ImpactLevelSchema,
+  ReachabilitySchema,
+  GraphOriginSchema,
+  ImpactNodeSchema,
+  AffectedTestSchema,
+  UnresolvedEdgeSchema,
+  ImpactCompletenessSchema,
+  CoverageReviewSchema,
+  PredictionReviewSchema,
+  ImpactAssessmentSchema,
+} from './schema/impact'
+export type {
+  ImpactLevel,
+  Reachability,
+  GraphOrigin,
+  ImpactNode,
+  AffectedTest,
+  UnresolvedEdge,
+  ImpactCompleteness,
+  CoverageReview,
+  PredictionReview,
+  ImpactAssessment,
+} from './schema/impact'
+
 export { GitError } from './vcs/exec'
 export { GitAdapter } from './vcs/git'
 export { parseNameStatus, parseUnifiedDiff } from './vcs/parse'
@@ -117,6 +142,8 @@ export {
 export { categorizePath, diffDependencies, enrichChangeSet } from './analyzer/change'
 export { analyzeScope } from './analyzer/scope'
 export type { ScopeResult } from './analyzer/scope'
+export { computeImpact } from './analyzer/impact'
+export type { ImpactSeed, ImpactGraphs, ImpactModel } from './analyzer/impact'
 
 export { DEFAULT_POLICY, applyPolicy } from './gate/policy'
 

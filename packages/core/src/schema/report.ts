@@ -3,6 +3,7 @@ import { FindingSchema } from './evidence'
 import { PathAssessmentSchema } from './scope'
 import { VerdictSchema } from './gate'
 import { BaselineComparisonSchema } from './baseline'
+import { ImpactAssessmentSchema } from './impact'
 
 /** Reports carry an explicit schema version so consumers can evolve independently. */
 export const REPORT_SCHEMA_VERSION = 1
@@ -70,5 +71,7 @@ export const VerificationReportSchema = z.object({
   statistics: ReportStatisticsSchema,
   /** Present when regression verification ran (M2 Baseline Engine). */
   baseline: BaselineComparisonSchema.optional(),
+  /** M3 impact intelligence — report-only, never gates. */
+  impact: ImpactAssessmentSchema.optional(),
 })
 export type VerificationReport = z.infer<typeof VerificationReportSchema>

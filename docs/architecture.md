@@ -215,7 +215,7 @@ Baseline Engine against the repository's existing tests; it reports
 | --------- | ------------------------------------------------------- | ------ |
 | M1        | Change Contract, Repository Intelligence (module graph), Change Analyzer, **Scope Analyzer**, Integrity Gate, Evidence-backed report | **shipped** |
 | M2        | **Baseline Engine**: deterministic existing-test regression detection, `--working-tree` mode | **shipped** |
-| M3        | Impact Analyzer: blast radius, affected-test selection   | planned |
+| M3        | Impact Analyzer: evidence-backed blast radius, affected tests, impact coverage, prediction-vs-reality | **shipped** |
 | M4        | Evidence reproduction (flaky re-runs), repair-loop report contract | planned |
 | M5        | LLM advisors, browser/API/contract/security/adversarial verification, non-JS languages, CI actions | planned |
 
@@ -256,6 +256,25 @@ children, so the execution boundary is enforced from day one.
 
 In M1, question 3 (regressions) is reported as **NOT VERIFIED** — honestly, until
 the Baseline Engine (M2) ships.
+
+### Impact Analyzer (M3)
+
+The Impact Analyzer answers "given the changes that actually occurred, what
+could this change affect?" Seeds are ALL actual changes regardless of scope
+classification — blast radius is a property of the change, not of the contract.
+Every affected node carries a level (DIRECT for the changed files themselves;
+HIGH/MEDIUM/LOW by minimum reverse-dependency distance) and up to three
+shortest evidence chains (`seed → … → node`), so every "affected" claim is
+inspectable rather than asserted. Tests and entrypoints are terminal: recorded
+as affected, never expanded upward. Deletions are traced through the
+before-state graph, renames through both states. Unresolved imports and
+computed dynamic imports surface as `unresolvedEdges` that mark the analysis
+PARTIAL rather than being guessed away. Impact coverage lists affected areas no
+relevant test exercises, and the prediction review compares predicted affected
+tests against M2's observed regressions — a prediction miss measures analyzer
+incompleteness, never extra risk in the change. The invariant: M3 informs but
+never reduces M2's full baseline — `--affected-only` is deliberately absent
+until prediction data justifies it.
 
 ## Repository layout
 

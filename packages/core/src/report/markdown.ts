@@ -96,6 +96,89 @@ export function renderMarkdownReport(report: VerificationReport): string {
     push(`- **Executed:** \`${b.executedCommand}\` in isolated worktrees; the working checkout was not touched.`, '')
   }
 
+  if (report.impact !== undefined) {
+    const impact = report.impact
+    const countLevel = (level: string): number =>
+      impact.affected.filter((node) => node.level === level).length
+    push('### Impact analysis ("what could this change affect?")', '')
+    push(`- **Changed seeds:** ${impact.seeds.length}`)
+    push(
+      `- **Potentially affected:** ${impact.affected.length} — DIRECT ${countLevel('DIRECT')}, HIGH ${countLevel('HIGH')}, MEDIUM ${countLevel('MEDIUM')}, LOW ${countLevel('LOW')}`,
+    )
+    push(`- **Relevant existing tests:** ${impact.affectedTests.length}`)
+    push(
+      `- **Impact coverage:** ${impact.coverage.coveragePercent}% — ${impact.coverage.coveredAreas} covered, ${impact.coverage.uncoveredAreas} uncovered affected area(s)`,
+    )
+    push(
+      `- **Graph completeness:** ${impact.completeness === 'complete' ? 'COMPLETE' : `PARTIAL — ${impact.unresolvedEdges.length} unresolved edge(s) (unresolved imports or computed dynamic imports)`}`,
+    )
+    push('')
+
+    const blastRadius = impact.affected
+      .filter((node) => !node.changed)
+      .sort((a, b) => a.distance - b.distance || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    if (blastRadius.length > 0) {
+      push('Affected areas beyond the changed files (evidence: seed → … → affected):', '')
+      push('```')
+      for (const node of blastRadius.slice(0, 8)) {
+        const chain =
+          node.reachability === 'known' && node.via.length > 0
+            ? node.via[0]!.join(' → ')
+            : 'no graph evidence'
+        push(`${node.path} — ${node.level}, distance ${node.distance}, via ${chain}`)
+      }
+      if (blastRadius.length > 8) push(`… and ${blastRadius.length - 8} more`)
+      push('```', '')
+    }
+
+    if (impact.affectedTests.length > 0) {
+      push('Relevant existing tests (evidence reversed for reading: test ← … ← seed):', '')
+      push('```')
+      for (const test of impact.affectedTests.slice(0, 8)) {
+        const chain =
+          test.evidencePaths.length > 0
+            ? [...test.evidencePaths[0]!].reverse().join(' ← ')
+            : test.path
+        push(chain)
+      }
+      if (impact.affectedTests.length > 8) push(`… and ${impact.affectedTests.length - 8} more`)
+      push('```', '')
+    }
+
+    if (impact.coverage.affectedAreas > 0) {
+      const coveredShown = impact.coverage.covered.slice(0, 10)
+      const uncoveredShown = impact.coverage.uncovered.slice(0, 10)
+      const overflowNote = (total: number, shown: number): string =>
+        total > shown ? ` … and ${total - shown} more` : ''
+      push(
+        `Covered (${impact.coverage.coveredAreas}): ${coveredShown.length > 0 ? coveredShown.join(', ') : '—'}${overflowNote(impact.coverage.coveredAreas, coveredShown.length)}`,
+      )
+      push(
+        `Uncovered (${impact.coverage.uncoveredAreas}): ${uncoveredShown.length > 0 ? uncoveredShown.map((path) => `⚠ ${path}`).join(', ') : '—'}${overflowNote(impact.coverage.uncoveredAreas, uncoveredShown.length)}`,
+      )
+      push('')
+    }
+
+    const review = impact.predictionReview
+    if (review !== undefined && review.mode !== 'not-applicable') {
+      if (review.mode === 'per-test') {
+        push(
+          `- **Prediction vs reality:** predicted ${review.predictedTests} relevant test(s); observed ${review.observedRegressions} regression(s); predicted ${review.predictedRegressions}; prediction misses ${review.predictionMisses.length}.`,
+        )
+        for (const miss of review.predictionMisses) {
+          push(
+            `  - prediction miss: "${miss.test}"${miss.file !== undefined ? ` (${miss.file})` : ''} — outside the predicted impact population (analyzer incompleteness, not additional risk in the change)`,
+          )
+        }
+      } else {
+        push(
+          `- **Prediction vs reality:** predicted ${review.predictedTests} relevant test(s); observed ${review.observedRegressions} regression(s); per-test attribution unavailable (suite-level runner outcomes), so predicted/misses are not meaningful here.`,
+        )
+      }
+      push('')
+    }
+  }
+
   push('### Findings', '')
   if (report.findings.length === 0) {
     push('None. No contract violations or anomalies detected by the deterministic scope analysis.', '')

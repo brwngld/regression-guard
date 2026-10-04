@@ -92,7 +92,7 @@ overridable per finding class in the contract.
 | --------- | ----- | ------ |
 | M1 | Change Contract, Repository Intelligence (module graph), Change Analyzer, **Scope Analyzer**, Integrity Gate, evidence-backed reports | **shipped** |
 | M2 | **Baseline Engine**: existing-test regression detection (per-test where the runner provides outcomes, suite-level fallback), `--working-tree` mode, hard timeouts with process-tree kill | **shipped** |
-| M3 | Impact Analyzer: blast radius, affected-test selection | planned |
+| M3 | **Impact Analyzer**: evidence-backed blast radius, affected tests, impact coverage, prediction-vs-reality (report-only, never gates) | **shipped** |
 | M4 | Evidence reproduction, repair-loop report contract | planned |
 | M5 | LLM advisors (contract inference, test generation), browser/API/security verification, CI actions | planned |
 

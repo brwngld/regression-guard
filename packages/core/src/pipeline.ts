@@ -2,11 +2,15 @@ import { parse as parseYaml } from 'yaml'
 import picomatch from 'picomatch'
 import { enrichChangeSet } from './analyzer/change'
 import { analyzeScope } from './analyzer/scope'
+import { computeImpact } from './analyzer/impact'
+import type { ImpactModel, ImpactSeed } from './analyzer/impact'
 import { buildGraph, refReader, workingTreeReader } from './intel/graph'
 import { applyPolicy } from './gate/policy'
 import { renderMarkdownReport } from './report/markdown'
 import { ContractValidationError, parseContract } from './schema/contract'
 import type { ChangeContract, FindingClass, PolicyAction } from './schema/contract'
+import type { Finding } from './schema/evidence'
+import type { PredictionReview } from './schema/impact'
 import { REPORT_SCHEMA_VERSION } from './schema/report'
 import type { VerificationReport } from './schema/report'
 import { runBaselineVerification } from './baseline/runner'
@@ -47,8 +51,8 @@ function parseContractYaml(text: string): unknown {
 /**
  * Full pipeline:
  *   contract → git diff → enrichment → intelligence graph → scope analysis →
- *   baseline engine (existing tests, before ↔ after) → integrity gate →
- *   evidence-backed report.
+ *   baseline engine (existing tests, before ↔ after) → impact analysis
+ *   (report-only annotation) → integrity gate → evidence-backed report.
  */
 export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
   const contract =
@@ -92,6 +96,34 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
     baselineFindings = outcome.findings
     if (outcome.baseline) {
       baseline = outcome.baseline
+    }
+  }
+
+  // Impact Analyzer (M3): given every change that actually occurred —
+  // regardless of scope classification — compute the evidence-backed blast
+  // radius over the intelligence graphs. Pure annotation: it never contributes
+  // findings, gate decisions, or verdicts, and never reduces what the Baseline
+  // Engine executed.
+  let impact: VerificationReport['impact']
+  if (changeSet.records.length > 0) {
+    const seeds: ImpactSeed[] = changeSet.records.map((record) => ({
+      path: record.path,
+      status: record.status,
+      oldPath: record.oldPath,
+    }))
+    // The before-state graph is only needed to trace deletions and renames
+    // (their importers exist only pre-change); build it lazily so runs
+    // without them pay for a single graph pass.
+    const needsBeforeGraph = changeSet.records.some(
+      (record) => record.status === 'deleted' || record.status === 'renamed',
+    )
+    const beforeGraph = needsBeforeGraph
+      ? await buildGraph(refReader(git, input.before))
+      : undefined
+    const model = computeImpact(seeds, { after: graph, before: beforeGraph })
+    impact = {
+      ...model,
+      predictionReview: reviewPredictions(model, baseline, baselineFindings, regressions),
     }
   }
 
@@ -154,6 +186,9 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
   if (baseline !== undefined) {
     report.baseline = baseline
   }
+  if (impact !== undefined) {
+    report.impact = impact
+  }
   if (changeSet.workingTree !== undefined) {
     report.workingTree = changeSet.workingTree
   }
@@ -163,4 +198,88 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
 
 function pathMatchesGlob(path: string, glob: string): boolean {
   return picomatch.isMatch(path, glob, { dot: true })
+}
+
+/**
+ * Prediction-vs-reality: measure how well the Impact Analyzer's predicted test
+ * population explains the regressions the Baseline Engine actually observed.
+ * Measurement only — a prediction miss means the analyzer's blast radius was
+ * incomplete, never that the change deserves additional rejection (M2's
+ * findings already cover the real regressions).
+ */
+function reviewPredictions(
+  impact: ImpactModel,
+  baseline: VerificationReport['baseline'],
+  findings: Finding[],
+  regressions: VerificationReport['threeQuestions']['regressions'],
+): PredictionReview {
+  const predictedTests = impact.affectedTests.length
+  const observedRegressions = regressions.regressionsFound ?? 0
+  if (baseline === undefined) {
+    // No baseline ran (tests skipped, or the runner could not verify
+    // anything): there is no observed reality to compare predictions against.
+    return {
+      mode: 'not-applicable',
+      predictedTests,
+      observedRegressions,
+      predictedRegressions: 0,
+      predictionMisses: [],
+    }
+  }
+  if (!baseline.perTest) {
+    // Suite-level outcomes carry no per-test attribution; predicted/misses
+    // would be noise, so the mode alone conveys the limitation.
+    return {
+      mode: 'suite',
+      predictedTests,
+      observedRegressions,
+      predictedRegressions: 0,
+      predictionMisses: [],
+    }
+  }
+  const affectedTestPaths = new Set(impact.affectedTests.map((test) => test.path))
+  let predictedRegressions = 0
+  const predictionMisses: PredictionReview['predictionMisses'] = []
+  for (const finding of findings) {
+    if (finding.findingClass !== 'test-regression') continue
+    const canonical = canonicalTestPath(finding.paths[0], affectedTestPaths)
+    if (canonical !== undefined && affectedTestPaths.has(canonical)) {
+      predictedRegressions += 1
+      continue
+    }
+    predictionMisses.push({
+      test: regressionDisplayName(finding, canonical ?? finding.paths[0]),
+      file: canonical ?? finding.paths[0],
+    })
+  }
+  return { mode: 'per-test', predictedTests, observedRegressions, predictedRegressions, predictionMisses }
+}
+
+/**
+ * Reduce a regression finding's reported test file to a repo-relative canonical
+ * path. Runners report suite paths as absolute worktree locations on some
+ * platforms, so a file is canonical when it equals an affected test path or
+ * ends with it as a path segment (`…/before/src/a.test.js` → `src/a.test.js`).
+ * Returns undefined when no file was reported.
+ */
+function canonicalTestPath(
+  file: string | undefined,
+  knownPaths: Set<string>,
+): string | undefined {
+  if (file === undefined) return undefined
+  const normalized = file.replace(/\\/g, '/')
+  const candidates = [...knownPaths].sort((a, b) => b.length - a.length)
+  for (const candidate of candidates) {
+    if (normalized === candidate || normalized.endsWith(`/${candidate}`)) return candidate
+  }
+  return file
+}
+
+/** `Test "X" …` → `X`; falls back to the file basename when no quoted name exists. */
+function regressionDisplayName(finding: Finding, file: string | undefined): string {
+  const quoted =
+    /Test "([^"]+)"/.exec(finding.evidence.claim) ?? /Test "([^"]+)"/.exec(finding.message)
+  if (quoted?.[1] !== undefined) return quoted[1]
+  if (file !== undefined) return file.slice(file.lastIndexOf('/') + 1) || file
+  return '(unnamed test)'
 }
