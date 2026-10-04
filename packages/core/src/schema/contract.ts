@@ -45,6 +45,10 @@ export const FindingClassSchema = z.enum([
   'deleted-test',
   'sensitive-file-changed',
   'unfulfilled-contract',
+  // M2 (Baseline Engine):
+  'test-regression',
+  'pre-existing-failure',
+  'baseline-incomplete',
 ])
 export type FindingClass = z.infer<typeof FindingClassSchema>
 

@@ -74,6 +74,17 @@ export function renderMarkdownReport(report: VerificationReport): string {
     '',
   )
 
+  if (report.baseline) {
+    const b = report.baseline
+    push('### Regression verification (baseline engine)', '')
+    push(`- **Test command:** \`${b.userCommand}\`${b.perTest ? '' : ' (suite-level outcomes — runner did not provide individual test results)'}`)
+    push(`- **Before:** \`${b.before.ref}\` (${b.before.sha.slice(0, 10)}) — exit ${b.before.exitCode ?? 'n/a'}, ${Math.round(b.before.durationMs / 100) / 10}s, ${b.before.tests.length} test(s)`)
+    push(`- **After:** \`${b.after.ref}\` (${b.after.sha.slice(0, 10)}) — exit ${b.after.exitCode ?? 'n/a'}, ${Math.round(b.after.durationMs / 100) / 10}s, ${b.after.tests.length} test(s)`)
+    const s = b.summary
+    push(`- **Transitions:** ${s.preserved} preserved, **${s.regressed} regressed**, ${s.preExisting} pre-existing, ${s.improved} improved, ${s.unknown} inconclusive.`)
+    push(`- **Executed:** \`${b.executedCommand}\` in isolated worktrees; the working checkout was not touched.`, '')
+  }
+
   push('### Findings', '')
   if (report.findings.length === 0) {
     push('None. No contract violations or anomalies detected by the deterministic scope analysis.', '')

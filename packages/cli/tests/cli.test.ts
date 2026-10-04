@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 const exec = promisify(execFile)
 
@@ -204,5 +204,168 @@ describe('regression-guard CLI (end-to-end)', () => {
 
     const forced = await runCli(['init', '--force'], repoDir)
     expect(forced.code).toBe(0)
+  })
+})
+
+describe('regression-guard CLI (M2: baseline + working-tree)', () => {
+  let repoDir: string
+
+  const FAKE_VITEST_FILES: Record<string, string> = {
+    'package.json': JSON.stringify(
+      { name: 'fake-vitest-app', version: '1.0.0', type: 'module', scripts: { test: 'vitest run' } },
+      null,
+      2,
+    ),
+    'tests/spec.json': JSON.stringify(
+      {
+        tests: [
+          { fullName: 'tasks > adds a task', title: 'adds a task', status: 'passed' },
+          { fullName: 'tasks > rejects blank', title: 'rejects blank', status: 'passed' },
+        ],
+      },
+      null,
+      2,
+    ),
+    'tools/fake-vitest.mjs': `import { readFile, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const base = dirname(fileURLToPath(import.meta.url))
+const argv = process.argv.slice(2)
+let outputFile = null
+for (let i = 0; i < argv.length; i += 1) {
+  const arg = argv[i]
+  if (arg === '--outputFile' && argv[i + 1] !== undefined) {
+    outputFile = argv[++i]
+  } else if (arg.startsWith('--outputFile=')) {
+    outputFile = arg.slice('--outputFile='.length)
+  }
+}
+const spec = JSON.parse(await readFile(join(base, '..', 'tests', 'spec.json'), 'utf8'))
+const tests = spec.tests ?? []
+const failed = tests.filter((test) => test.status === 'failed')
+const report = {
+  numTotalTests: tests.length,
+  numPassedTests: tests.length - failed.length,
+  numFailedTests: failed.length,
+  success: failed.length === 0,
+  testResults: [
+    {
+      name: join(base, '..', 'tests', 'spec.vtest.js'),
+      status: failed.length === 0 ? 'passed' : 'failed',
+      message: '',
+      assertionResults: tests.map((test) => ({
+        ancestorTitles: [],
+        fullName: test.fullName,
+        title: test.title,
+        status: test.status,
+        failureMessages: test.failureMessage ? [test.failureMessage] : [],
+      })),
+    },
+  ],
+}
+if (outputFile) {
+  await writeFile(outputFile, JSON.stringify(report, null, 2))
+}
+process.exit(failed.length === 0 ? 0 : 1)
+`,
+    'node_modules/.bin/vitest': `#!/usr/bin/env node
+import '../../tools/fake-vitest.mjs'
+`,
+    'node_modules/.bin/vitest.cmd': `@node "%~dp0/../../tools/fake-vitest.mjs" %*
+`,
+  }
+
+  beforeEach(async () => {
+    repoDir = await mkdtemp(join(tmpdir(), 'rg-cli-m2-'))
+    for (const [file, content] of Object.entries(FAKE_VITEST_FILES)) {
+      const target = join(repoDir, file)
+      await mkdir(join(target, '..'), { recursive: true })
+      await writeFile(target, content, 'utf8')
+    }
+    await writeFile(
+      join(repoDir, 'contract.yaml'),
+      'version: 1\nid: spec-update\ngoal: update spec\npaths:\n  mustChange: ["tests/spec.json"]\n',
+      'utf8',
+    )
+    await git(repoDir, 'init', '-q')
+    await git(repoDir, 'add', '-A')
+    await git(repoDir, 'commit', '-qm', 'base')
+    await git(repoDir, 'branch', 'base')
+    await git(repoDir, 'update-index', '--chmod=+x', 'node_modules/.bin/vitest')
+    await git(repoDir, 'commit', '-qm', 'chmod' )
+    await git(repoDir, 'branch', '-f', 'base')
+  })
+
+  afterEach(async () => {
+    await rm(repoDir, { recursive: true, force: true })
+  })
+
+  it('verifies uncommitted changes with --working-tree without mutating the checkout', async () => {
+    const headBefore = (await git(repoDir, 'rev-parse', 'HEAD')).trim()
+    // Dirty change: flip one test to failing, uncommitted.
+    await writeFile(
+      join(repoDir, 'tests', 'spec.json'),
+      JSON.stringify(
+        {
+          tests: [
+            { fullName: 'tasks > adds a task', title: 'adds a task', status: 'passed' },
+            { fullName: 'tasks > rejects blank', title: 'rejects blank', status: 'failed', failureMessage: 'dirty regression' },
+          ],
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    )
+
+    const result = await runCli(
+      ['verify', '--contract', 'contract.yaml', '--before', 'base', '--working-tree'],
+      repoDir,
+    )
+
+    expect(result.code).toBe(1)
+    expect(result.stdout).toContain('## Verdict: REJECT')
+    expect(result.stdout).toContain('test-regression')
+    expect(result.stdout).toContain('tasks > rejects blank')
+    expect(result.stderr).toContain('regressions: fail (1)')
+
+    // No commit happened; the checkout is still dirty; no worktrees leaked.
+    const headAfter = (await git(repoDir, 'rev-parse', 'HEAD')).trim()
+    expect(headAfter).toBe(headBefore)
+    const status = await git(repoDir, 'status', '--porcelain')
+    expect(status).toContain('tests/spec.json')
+    const worktrees = (await git(repoDir, 'worktree', 'list', '--porcelain')).trim().split('\n\n')
+    expect(worktrees).toHaveLength(1)
+  })
+
+  it('rejects --working-tree together with --after', async () => {
+    const result = await runCli(
+      ['verify', '--contract', 'contract.yaml', '--before', 'base', '--after', 'HEAD', '--working-tree'],
+      repoDir,
+    )
+    expect(result.code).toBe(2)
+  })
+
+  it('requires --after unless --working-tree is given', async () => {
+    const result = await runCli(['verify', '--contract', 'contract.yaml', '--before', 'base'], repoDir)
+    expect(result.code).toBe(2)
+    expect(result.stderr).toContain('--after is required')
+  })
+
+  it('skips regression verification with --skip-tests', async () => {
+    await git(repoDir, 'checkout', '-q', '-b', 'clean', 'base')
+    await writeFile(join(repoDir, 'tests', 'spec.json'), JSON.stringify({ tests: [{ fullName: 'x', title: 'x', status: 'passed' }] }, null, 2), 'utf8')
+    await git(repoDir, 'add', '-A')
+    await git(repoDir, 'commit', '-qm', 'spec change')
+
+    const result = await runCli(
+      ['verify', '--contract', 'contract.yaml', '--before', 'base', '--after', 'HEAD', '--skip-tests', '--format', 'json'],
+      repoDir,
+    )
+    expect(result.code).toBe(0)
+    const parsed = JSON.parse(result.stdout) as { threeQuestions: { regressions: { status: string } }; baseline?: unknown }
+    expect(parsed.threeQuestions.regressions.status).toBe('not-verified')
+    expect(parsed.baseline).toBeUndefined()
   })
 })

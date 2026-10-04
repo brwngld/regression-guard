@@ -27,9 +27,12 @@ npm run verify:demo # watch the engine reject a disguised out-of-scope change
 ```
 
 The demo copies `examples/todo-app` into a temp repo, commits a plausible
-"UI polish" change that quietly rewrites the localStorage key and adds a
-dependency, and verifies it against the app's change contract — resulting in a
-REJECT with evidence for both violations.
+"UI polish" change that quietly rewrites the localStorage key, weakens input
+validation (deterministically breaking an existing test), and adds a
+dependency. Verification runs the app's real vitest suite against both
+revisions in isolated worktrees and produces a REJECT on two independent
+axes: out-of-scope changes, and a test regression caught by the Baseline
+Engine.
 
 ## Usage
 
@@ -37,11 +40,22 @@ REJECT with evidence for both violations.
 # Scaffold a contract for your change
 npx regression-guard init
 
-# Edit it (must/may/preserve/prohibit paths), then verify any two refs
+# Edit it (must/may/preserve/prohibit paths), then verify any two refs.
+# The existing test suite runs against both revisions in isolated worktrees.
 npx regression-guard verify \
   --contract regression-guard.contract.yaml \
   --before main \
   --after my-feature
+
+# Verify uncommitted changes (a coding agent's work-in-progress) without committing
+npx regression-guard verify \
+  --contract regression-guard.contract.yaml \
+  --before main \
+  --working-tree
+
+# Skip regression verification, or bound hanging runners (default 300s per run)
+npx regression-guard verify ... --skip-tests
+npx regression-guard verify ... --test-timeout 120000
 ```
 
 A contract looks like this (see [examples/todo-app/contracts/ui-polish.yaml](examples/todo-app/contracts/ui-polish.yaml)):
@@ -77,12 +91,16 @@ overridable per finding class in the contract.
 | Milestone | Scope | Status |
 | --------- | ----- | ------ |
 | M1 | Change Contract, Repository Intelligence (module graph), Change Analyzer, **Scope Analyzer**, Integrity Gate, evidence-backed reports | **shipped** |
-| M2 | Baseline Engine + existing-test regression diffing, `--working-tree` mode | planned |
+| M2 | **Baseline Engine**: existing-test regression detection (per-test where the runner provides outcomes, suite-level fallback), `--working-tree` mode, hard timeouts with process-tree kill | **shipped** |
 | M3 | Impact Analyzer: blast radius, affected-test selection | planned |
 | M4 | Evidence reproduction, repair-loop report contract | planned |
 | M5 | LLM advisors (contract inference, test generation), browser/API/security verification, CI actions | planned |
 
-Question 3 (regressions) is reported honestly as **NOT VERIFIED** until M2.
+Regression classification is conservative at every branch: PASS→PASS is
+preserved, PASS→FAIL is a regression (REJECT by default), FAIL→FAIL is
+pre-existing and never worsens the verdict alone, FAIL→PASS is an improvement,
+and missing or inconclusive executions report `partial` — never silently a
+pass.
 
 ## Repository layout
 

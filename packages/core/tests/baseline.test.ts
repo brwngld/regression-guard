@@ -1,0 +1,295 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { verifyChange } from '../src/pipeline'
+import { TempRepo, fakeVitestApp, PASSING_SPECS, SAMPLE_APP, type FakeTestSpec } from './helpers/repo'
+
+const SPEC_CONTRACT = `
+version: 1
+id: spec-update
+goal: Update the test specification
+paths:
+  mustChange: ["tests/spec.json"]
+`
+
+async function specJson(specs: FakeTestSpec[]): Promise<string> {
+  return JSON.stringify({ tests: specs }, null, 2)
+}
+
+describe('baseline engine (per-test mode via direct runner)', () => {
+  let repo: TempRepo
+
+  beforeAll(async () => {
+    repo = await TempRepo.create(fakeVitestApp(PASSING_SPECS))
+    await repo.markExecutable('node_modules/.bin/vitest')
+    await repo.git('branch', 'base')
+  })
+
+  afterAll(async () => {
+    await repo.destroy()
+  })
+
+  it('reports preserved baseline (pass) for a change that breaks nothing', async () => {
+    await repo.write({ 'README.md': '# fake app\n\nmore\n' })
+    await repo.commit('docs')
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: SPEC_CONTRACT.replaceAll('tests/spec.json', 'README.md'),
+    })
+
+    expect(report.threeQuestions.regressions).toEqual({ status: 'pass', baselineTests: 2, regressionsFound: 0 })
+    expect(report.verdict).toBe('ACCEPT')
+    expect(report.baseline?.perTest).toBe(true)
+  })
+
+  it('detects a deterministic PASS->FAIL regression and rejects', async () => {
+    await repo.git('checkout', '-q', '-b', 'break', 'base')
+    const broken: FakeTestSpec[] = [
+      PASSING_SPECS[0]!,
+      { fullName: 'tasks > rejects blank', title: 'rejects blank', status: 'failed', failureMessage: 'Expected throw but nothing was thrown' },
+    ]
+    await repo.write({ 'tests/spec.json': await specJson(broken) })
+    await repo.commit('break a test')
+
+    const report = await verifyChange({ repo: repo.dir, before: 'base', after: 'break', contract: SPEC_CONTRACT })
+
+    expect(report.threeQuestions.regressions).toEqual({ status: 'fail', baselineTests: 2, regressionsFound: 1 })
+    expect(report.verdict).toBe('REJECT')
+
+    const regression = report.findings.find((finding) => finding.findingClass === 'test-regression')
+    expect(regression?.evidence.kind).toBe('test')
+    expect(regression?.evidence.claim).toContain('tasks > rejects blank')
+    expect(regression?.evidence.observation).toContain('Before')
+    expect(regression?.evidence.observation).toContain('After')
+    expect(regression?.evidence.observation).toContain('Expected throw but nothing was thrown')
+    expect(regression?.evidence.reproduction).toBe('npm test')
+    expect(report.baseline?.summary).toMatchObject({ preserved: 1, regressed: 1, preExisting: 0 })
+  })
+
+  it('leaves worktrees cleaned up and the checkout untouched after verification', async () => {
+    const worktrees = (await repo.git('worktree', 'list', '--porcelain')).trim().split('\n\n').length
+    expect(worktrees).toBe(1)
+    const status = await repo.git('status', '--porcelain')
+    expect(status.trim()).toBe('')
+  })
+
+  it('treats FAIL->FAIL as pre-existing, never worsening the verdict', async () => {
+    // Fresh repo whose baseline already has one failing test.
+    const dirty = await TempRepo.create(
+      fakeVitestApp([
+        PASSING_SPECS[0]!,
+        { fullName: 'tasks > rejects blank', title: 'rejects blank', status: 'failed', failureMessage: 'broken before the change' },
+      ]),
+    )
+    await dirty.markExecutable('node_modules/.bin/vitest')
+    await dirty.git('branch', 'base')
+    await dirty.write({ 'README.md': '# changed\n' })
+    await dirty.commit('innocent change')
+
+    const report = await verifyChange({
+      repo: dirty.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: SPEC_CONTRACT.replaceAll('tests/spec.json', 'README.md'),
+    })
+
+    expect(report.threeQuestions.regressions).toEqual({ status: 'pass', baselineTests: 2, regressionsFound: 0 })
+    expect(report.baseline?.summary).toMatchObject({ preserved: 1, preExisting: 1, regressed: 0 })
+    const preExisting = report.findings.find((finding) => finding.findingClass === 'pre-existing-failure')
+    expect(preExisting?.severity).toBe('info')
+    // The spec's key requirement: a pre-existing failure alone must not reject.
+    expect(report.verdict).toBe('ACCEPT')
+    await dirty.destroy()
+  })
+
+  it('treats FAIL->PASS as an improvement (pass, no finding)', async () => {
+    const repair = await TempRepo.create(
+      fakeVitestApp([
+        PASSING_SPECS[0]!,
+        { fullName: 'tasks > rejects blank', title: 'rejects blank', status: 'failed', failureMessage: 'broken before' },
+      ]),
+    )
+    await repair.markExecutable('node_modules/.bin/vitest')
+    await repair.git('branch', 'base')
+    await repair.write({ 'tests/spec.json': await specJson(PASSING_SPECS) })
+    await repair.commit('repair the test')
+
+    const report = await verifyChange({ repo: repair.dir, before: 'base', after: 'HEAD', contract: SPEC_CONTRACT })
+
+    expect(report.baseline?.summary).toMatchObject({ preserved: 1, improved: 1, regressed: 0 })
+    expect(report.threeQuestions.regressions.status).toBe('pass')
+    expect(report.verdict).toBe('ACCEPT')
+    await repair.destroy()
+  })
+
+  it('classifies missing-after tests as inconclusive (partial), never silently passing', async () => {
+    await repo.git('checkout', '-q', '-b', 'remove-test', 'base')
+    await repo.write({ 'tests/spec.json': await specJson([PASSING_SPECS[0]!]) })
+    await repo.commit('remove a test')
+
+    const report = await verifyChange({ repo: repo.dir, before: 'base', after: 'remove-test', contract: SPEC_CONTRACT })
+
+    expect(report.threeQuestions.regressions.status).toBe('partial')
+    expect(report.baseline?.summary).toMatchObject({ preserved: 1, unknown: 1 })
+    expect(report.findings.map((finding) => finding.findingClass)).toContain('baseline-incomplete')
+    await repo.git('checkout', '-q', '-')
+  })
+})
+
+describe('baseline engine (suite-level fallback)', () => {
+  it('detects suite regressions for runners without per-test output', async () => {
+    const repo = await TempRepo.create(SAMPLE_APP)
+    await repo.git('branch', 'base')
+    // Break the code the suite exercises; contract authorizes it (scope-clean).
+    await repo.write({
+      'src/tasks.js': `export const STORAGE_KEY = 'sample.tasks'
+
+export function addTask(tasks, text) {
+  return [...tasks, { id: 'fixed-id', text: String(text ?? ''), completed: false }]
+}
+`,
+    })
+    await repo.commit('break normalization')
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: `version: 1\nid: logic\ngoal: change logic\npaths:\n  mustChange: ["src/tasks.js"]\n`,
+    })
+
+    expect(report.baseline?.perTest).toBe(false)
+    expect(report.threeQuestions.regressions).toEqual({ status: 'fail', baselineTests: 1, regressionsFound: 1 })
+    expect(report.findings.map((finding) => finding.findingClass)).toContain('test-regression')
+    await repo.destroy()
+  })
+
+  it('reports partial when the baseline suite itself fails (attribution impossible)', async () => {
+    const files = { ...SAMPLE_APP, 'tests/run.js': `console.log('always failing')\nprocess.exit(1)\n` }
+    const repo = await TempRepo.create(files)
+    await repo.git('branch', 'base')
+    await repo.write({ 'README.md': '# changed\n' })
+    await repo.commit('docs')
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: `version: 1\nid: docs\ngoal: update docs\npaths:\n  mustChange: ["README.md"]\n`,
+    })
+
+    expect(report.threeQuestions.regressions.status).toBe('partial')
+    const classes = report.findings.map((finding) => finding.findingClass)
+    expect(classes).toContain('baseline-incomplete')
+    expect(classes).not.toContain('test-regression')
+    expect(report.verdict).toBe('ACCEPT')
+    await repo.destroy()
+  })
+
+  it('stays not-verified when the repository declares no test command', async () => {
+    const files = { ...SAMPLE_APP }
+    files['package.json'] = JSON.stringify({ name: 'no-tests', version: '1.0.0', type: 'module' }, null, 2)
+    const repo = await TempRepo.create(files)
+    await repo.git('branch', 'base')
+    await repo.write({ 'README.md': '# changed\n' })
+    await repo.commit('docs')
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: `version: 1\nid: docs\ngoal: docs\npaths:\n  mustChange: ["README.md"]\n`,
+    })
+
+    expect(report.threeQuestions.regressions).toEqual({ status: 'not-verified' })
+    expect(report.baseline).toBeUndefined()
+    await repo.destroy()
+  })
+
+  it('times out hanging suites, kills the process tree, and reports partial', async () => {
+    const files = {
+      ...fakeVitestApp(PASSING_SPECS),
+      'package.json': JSON.stringify(
+        { name: 'hanging-app', version: '1.0.0', type: 'module', scripts: { test: 'node tools/hang.js' } },
+        null,
+        2,
+      ),
+      'tools/hang.js': 'setInterval(() => {}, 1000)\nconsole.log("hanging forever")\n',
+    }
+    const repo = await TempRepo.create(files)
+    await repo.git('branch', 'base')
+
+    const startedAt = Date.now()
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: SPEC_CONTRACT,
+      testTimeoutMs: 4_000,
+    })
+    const elapsed = Date.now() - startedAt
+
+    expect(elapsed).toBeLessThan(60_000)
+    expect(report.baseline?.before.timedOut).toBe(true)
+    expect(report.baseline?.after.timedOut).toBe(true)
+    expect(report.threeQuestions.regressions.status).toBe('partial')
+    expect(report.findings.map((finding) => finding.findingClass)).toContain('baseline-incomplete')
+    await repo.destroy()
+  })
+
+  it('reports partial when the test command itself cannot run', async () => {
+    const files = {
+      ...fakeVitestApp(PASSING_SPECS),
+      'package.json': JSON.stringify(
+        { name: 'broken-cmd', version: '1.0.0', type: 'module', scripts: { test: 'node tools/does-not-exist.js' } },
+        null,
+        2,
+      ),
+    }
+    const repo = await TempRepo.create(files)
+    await repo.git('branch', 'base')
+
+    const report = await verifyChange({ repo: repo.dir, before: 'base', after: 'HEAD', contract: SPEC_CONTRACT })
+
+    expect(report.threeQuestions.regressions.status).toBe('partial')
+    expect(report.findings.map((finding) => finding.findingClass)).not.toContain('test-regression')
+    await repo.destroy()
+  })
+})
+
+describe('working-tree verification (uncommitted changes)', () => {
+  it('verifies dirty changes without committing and without mutating the checkout', async () => {
+    const repo = await TempRepo.create(fakeVitestApp(PASSING_SPECS))
+    await repo.markExecutable('node_modules/.bin/vitest')
+    await repo.git('branch', 'base')
+    const headBefore = (await repo.git('rev-parse', 'HEAD')).trim()
+
+    // Dirty change: flip one test to failing, no commit.
+    const broken: FakeTestSpec[] = [
+      PASSING_SPECS[0]!,
+      { fullName: 'tasks > rejects blank', title: 'rejects blank', status: 'failed', failureMessage: 'regressed in working tree' },
+    ]
+    await repo.write({ 'tests/spec.json': JSON.stringify({ tests: broken }, null, 2) })
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      mode: 'working-tree',
+      contract: SPEC_CONTRACT,
+    })
+
+    expect(report.after).toBe('working-tree')
+    expect(report.threeQuestions.regressions).toEqual({ status: 'fail', baselineTests: 2, regressionsFound: 1 })
+    expect(report.verdict).toBe('REJECT')
+
+    // The checkout was not mutated or committed.
+    const headAfter = (await repo.git('rev-parse', 'HEAD')).trim()
+    expect(headAfter).toBe(headBefore)
+    const status = await repo.git('status', '--porcelain')
+    expect(status).toContain('tests/spec.json')
+    const worktrees = (await repo.git('worktree', 'list', '--porcelain')).trim().split('\n\n').length
+    expect(worktrees).toBe(1)
+    await repo.destroy()
+  })
+})

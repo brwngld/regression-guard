@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { Project, SyntaxKind, type StringLiteral } from 'ts-morph'
 import type { GitAdapter } from '../vcs/git'
 import { isRelativeSpecifier, packageNameOf, resolveSpecifier } from './resolve'
@@ -136,13 +138,46 @@ export function collectJsImports(content: string): { relative: string[]; externa
   }
 }
 
+/** Abstract read access to a repository snapshot (a ref or the working tree). */
+export interface RepoReader {
+  listFiles(): Promise<string[]>
+  readFile(path: string): Promise<string | null>
+}
+
+export function refReader(git: GitAdapter, ref: string): RepoReader {
+  return {
+    listFiles: () => git.listFiles(ref),
+    readFile: (path) => git.readFileAt(ref, path),
+  }
+}
+
+/** Tracked + untracked (non-ignored) files, read from disk. */
+export function workingTreeReader(git: GitAdapter): RepoReader {
+  const listOnce = async (): Promise<string[]> => {
+    const tracked = await git.listFiles('HEAD')
+    const untracked = await git.listUntracked()
+    return [...new Set([...tracked, ...untracked])]
+  }
+  let cached: Promise<string[]> | null = null
+  return {
+    listFiles: () => (cached ??= listOnce()),
+    readFile: async (path) => {
+      try {
+        return await readFile(join(git.repoRoot, path), 'utf8')
+      } catch {
+        return null
+      }
+    },
+  }
+}
+
 /**
- * Build the repository intelligence graph at a ref: file nodes, import edges,
- * and reverse (importedBy) edges. Only tracked files are considered, so
- * node_modules and build output are invisible by construction.
+ * Build the repository intelligence graph over a snapshot: file nodes, import
+ * edges, and reverse (importedBy) edges. node_modules and build output are
+ * invisible by construction (git-tracked or gitignored files only).
  */
-export async function buildGraph(git: GitAdapter, ref: string): Promise<DependencyGraph> {
-  const paths = await git.listFiles(ref)
+export async function buildGraph(reader: RepoReader): Promise<DependencyGraph> {
+  const paths = await reader.listFiles()
   const existing = new Set(paths)
   const files: Record<string, FileNode> = {}
 
@@ -159,7 +194,7 @@ export async function buildGraph(git: GitAdapter, ref: string): Promise<Dependen
     const node = ensureNode(path)
 
     if (PARSE_EXTENSIONS.has(path.slice(path.lastIndexOf('.')))) {
-      const content = await git.readFileAt(ref, path)
+      const content = await reader.readFile(path)
       if (content !== null) {
         const { relative, external } = collectJsImports(content)
         node.imports = relative
@@ -171,7 +206,7 @@ export async function buildGraph(git: GitAdapter, ref: string): Promise<Dependen
     }
 
     if (node.kind === 'entry-html') {
-      const content = await git.readFileAt(ref, path)
+      const content = await reader.readFile(path)
       if (content === null) {
         continue
       }
@@ -187,7 +222,7 @@ export async function buildGraph(git: GitAdapter, ref: string): Promise<Dependen
     }
 
     if (path === 'package.json') {
-      const content = await git.readFileAt(ref, path)
+      const content = await reader.readFile(path)
       if (content === null) {
         continue
       }

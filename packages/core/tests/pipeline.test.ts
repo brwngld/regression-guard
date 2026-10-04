@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { buildGraph } from '../src/intel/graph'
+import { buildGraph, refReader } from '../src/intel/graph'
 import { verifyChange } from '../src/pipeline'
 import { GitAdapter } from '../src/vcs/git'
 import { SAMPLE_APP, TempRepo } from './helpers/repo'
@@ -17,7 +17,7 @@ describe('repository intelligence graph', () => {
 
   it('builds import edges, reverse edges, and kinds from a real git ref', async () => {
     const git = await GitAdapter.open(repo.dir)
-    const graph = await buildGraph(git, 'HEAD')
+    const graph = await buildGraph(refReader(git, 'HEAD'))
 
     expect(graph.files['src/main.js']?.imports.sort()).toEqual([
       'src/style.css',
@@ -28,7 +28,11 @@ describe('repository intelligence graph', () => {
     expect(graph.files['index.html']?.imports).toEqual(['src/main.js'])
     expect(graph.files['index.html']?.kind).toBe('entry-html')
     expect(graph.files['src/tasks.test.js']?.externalImports).toEqual([])
-    expect(graph.importedBy['src/tasks.js']?.sort()).toEqual(['src/main.js', 'src/tasks.test.js'])
+    expect(graph.importedBy['src/tasks.js']?.sort()).toEqual([
+      'src/main.js',
+      'src/tasks.test.js',
+      'tests/run.js',
+    ])
   })
 })
 
@@ -58,7 +62,7 @@ describe('verifyChange end-to-end', () => {
     await repo.destroy()
   })
 
-  it('accepts an in-scope styling change', async () => {
+  it('accepts an in-scope styling change with a preserved baseline', async () => {
     await repo.write({ 'src/style.css': 'body { margin: 0; padding: 1rem; }\n' })
     await repo.commit('polish styles')
 
@@ -68,7 +72,7 @@ describe('verifyChange end-to-end', () => {
     expect(report.threeQuestions).toEqual({
       accomplished: 'yes',
       withinScope: 'yes',
-      regressions: { status: 'not-verified' },
+      regressions: { status: 'pass', baselineTests: 1, regressionsFound: 0 },
     })
     expect(report.schemaVersion).toBe(1)
     expect(report.statistics).toMatchObject({ filesChanged: 1, expected: 1 })
@@ -76,7 +80,7 @@ describe('verifyChange end-to-end', () => {
     expect(report.markdown).toContain('## Verdict: ACCEPT')
   })
 
-  it('rejects a change that touches the must-preserve logic file', async () => {
+  it('rejects a change that touches the must-preserve logic file (and regresses the suite)', async () => {
     await repo.write({
       'src/style.css': 'body { margin: 2rem; }\n',
       'src/tasks.js': `export function addTask(tasks, text) {
@@ -90,8 +94,11 @@ describe('verifyChange end-to-end', () => {
 
     expect(report.verdict).toBe('REJECT')
     expect(report.threeQuestions.withinScope).toBe('no')
+    // The same change also breaks the suite: two independent reject reasons.
+    expect(report.threeQuestions.regressions.status).toBe('fail')
     const classes = report.findings.map((finding) => finding.findingClass)
     expect(classes).toContain('preserved-area-changed')
+    expect(classes).toContain('test-regression')
     const tasks = report.perPath.find((item) => item.path === 'src/tasks.js')
     expect(tasks?.classification).toBe('SUSPICIOUS')
 
@@ -115,7 +122,14 @@ describe('verifyChange end-to-end', () => {
     })
     await repo.commit('add leftpad')
 
-    const report = await verifyChange({ repo: repo.dir, before: 'base', after: 'HEAD', contract: UI_CONTRACT })
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: UI_CONTRACT,
+      // Scope-focused scenario; the synthetic dependency is not installable.
+      runTests: false,
+    })
 
     expect(report.verdict).toBe('REJECT')
     const classes = report.findings.map((finding) => finding.findingClass)

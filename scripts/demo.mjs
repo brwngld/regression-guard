@@ -1,10 +1,12 @@
 /**
  * End-to-end demo: copy the example app into a temp repo, commit a plausible
- * "UI polish" change that quietly rewrites the storage key and adds a
- * dependency, then verify it against the app's change contract.
+ * "UI polish" change that quietly rewrites the storage key, weakens input
+ * validation (breaking a real test), and adds a dependency — then verify it
+ * against the app's change contract.
  *
- * The demo always ends REJECT — that is the point: the change looks like
- * styling work but violates the contract in two independent ways.
+ * The demo always ends REJECT on two independent axes: out-of-scope changes
+ * (question 2) and a deterministic test regression discovered by the
+ * Baseline Engine (question 3).
  */
 import { execFile as execFileCb } from 'node:child_process'
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -38,12 +40,19 @@ try {
   await git('branch', 'base')
 
   // The change producer (human, AI agent, or bot — the engine cannot tell,
-  // by design) makes its change: real styling work, plus two quiet edits.
+  // by design) makes its change: real styling work, plus three quiet edits.
   const css = await readFile(path.join(dir, 'src', 'style.css'), 'utf8')
   await writeFile(path.join(dir, 'src', 'style.css'), `${css}\n.todo-app { max-width: 34rem; margin-inline: auto; }\n`)
 
+  // Quietly rewrite the storage key AND remove input normalization — the
+  // latter deterministically breaks the existing blank-task test.
   const tasks = await readFile(path.join(dir, 'src', 'tasks.js'), 'utf8')
-  await writeFile(path.join(dir, 'src', 'tasks.js'), tasks.replace("'todo-list.tasks'", "'todo.tasks.v2'"))
+  await writeFile(
+    path.join(dir, 'src', 'tasks.js'),
+    tasks
+      .replace("'todo-list.tasks'", "'todo.tasks.v2'")
+      .replace("String(text ?? '').trim()", 'String(text ?? "")'),
+  )
 
   const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8'))
   pkg.dependencies = { ...(pkg.dependencies ?? {}), lodash: '^4.17.21' }

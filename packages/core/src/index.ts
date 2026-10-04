@@ -71,12 +71,42 @@ export { GitAdapter } from './vcs/git'
 export { parseNameStatus, parseUnifiedDiff } from './vcs/parse'
 export type { RawStatusEntry, UnifiedSection } from './vcs/parse'
 
+export { runCommand } from './exec/run'
+export type { RunOutcome } from './exec/run'
+
+export {
+  TestStatusSchema,
+  TestCaseOutcomeSchema,
+  TestRunResultSchema,
+  BaselineSummarySchema,
+  BaselineComparisonSchema,
+  TransitionKindSchema,
+} from './schema/baseline'
+export type {
+  TestStatus,
+  TestCaseOutcome,
+  TestRunResult,
+  BaselineSummary,
+  BaselineComparison,
+  TransitionKind,
+  TestTransition,
+} from './schema/baseline'
+export { discoverTestCommand, packageJsonHasDependencies } from './baseline/discover'
+export type { TestCommandPlan } from './baseline/discover'
+export { parseRunnerJson } from './baseline/parse'
+export { classifyPerTest, classifySuite, summarize, suiteStatusOf } from './baseline/compare'
+export type { SuiteStatus } from './baseline/compare'
+export { runBaselineVerification } from './baseline/runner'
+export type { BaselineOptions, BaselineOutcome } from './baseline/runner'
+
 export {
   buildGraph,
   collectJsImports,
   isTestPath,
+  refReader,
+  workingTreeReader,
 } from './intel/graph'
-export type { FileKind, FileNode, DependencyGraph } from './intel/graph'
+export type { FileKind, FileNode, DependencyGraph, RepoReader } from './intel/graph'
 export {
   isRelativeSpecifier,
   packageNameOf,

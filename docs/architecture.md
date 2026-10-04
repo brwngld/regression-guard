@@ -207,15 +207,36 @@ same engine works locally, in code review, and in CI.
 
 The engine is deterministic (no LLM in the core). LLM *advisors* — contract
 inference, test generation — attach later behind a reserved interface and never
-replace the deterministic verdicts.
+replace the deterministic verdicts. Question 3 (regressions) is answered by the
+Baseline Engine against the repository's existing tests; it reports
+`not-verified` only when regression verification was not performed.
 
 | Milestone | Scope                                                   | Status |
 | --------- | ------------------------------------------------------- | ------ |
 | M1        | Change Contract, Repository Intelligence (module graph), Change Analyzer, **Scope Analyzer**, Integrity Gate, Evidence-backed report | **shipped** |
-| M2        | Baseline Engine + existing-test regression diffing, `--working-tree` mode | planned |
+| M2        | **Baseline Engine**: deterministic existing-test regression detection, `--working-tree` mode | **shipped** |
 | M3        | Impact Analyzer: blast radius, affected-test selection   | planned |
 | M4        | Evidence reproduction (flaky re-runs), repair-loop report contract | planned |
 | M5        | LLM advisors, browser/API/contract/security/adversarial verification, non-JS languages, CI actions | planned |
+
+### Baseline Engine (M2)
+
+The engine discovers the repository's declared `scripts.test` and executes it
+against the before and after revisions in **isolated temporary git worktrees**;
+the user's checkout is never mutated (working-tree mode materializes dirty
+state by overlaying it onto a base worktree). Outcomes are modeled per test
+where the runner provides them (vitest/jest JSON reports); otherwise an honest
+suite-level fallback applies. Transitions are classified conservatively:
+
+```
+PASS -> PASS   preserved          PASS -> FAIL   regression (REJECT by default)
+FAIL -> FAIL   pre-existing       FAIL -> PASS   improvement
+missing/inconclusive              unknown -> partial, never silently a pass
+```
+
+Every execution runs under a hard timeout with process-tree kill and capped
+output capture — test runners hang, servers stay alive, and children spawn
+children, so the execution boundary is enforced from day one.
 
 In M1, question 3 (regressions) is reported as **NOT VERIFIED** — honestly, until
 the Baseline Engine (M2) ships.

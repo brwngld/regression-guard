@@ -64,10 +64,13 @@ program
 
 program
   .command('verify')
-  .description('Verify the change between two git refs against a change contract')
+  .description('Verify the change between two git refs (or the uncommitted working tree) against a change contract')
   .requiredOption('--contract <path>', 'path to a YAML change contract')
   .requiredOption('--before <ref>', 'git ref of the base state (branch, tag, or SHA)')
-  .requiredOption('--after <ref>', 'git ref of the changed state')
+  .option('--after <ref>', 'git ref of the changed state (required unless --working-tree)')
+  .option('--working-tree', 'verify uncommitted changes on top of --before, without committing')
+  .option('--skip-tests', 'skip regression verification (regressions stay not-verified)')
+  .option('--test-timeout <ms>', 'per-run timeout for test execution', '300000')
   .option('--cwd <dir>', 'repository (or any directory inside it)', process.cwd())
   .option('--format <kind>', 'report format: markdown or json', 'markdown')
   .option('--out <file>', 'write the report to a file instead of stdout')
@@ -75,13 +78,26 @@ program
     async (options: {
       contract: string
       before: string
-      after: string
+      after?: string
+      workingTree?: boolean
+      skipTests?: boolean
+      testTimeout: string
       cwd: string
       format: string
       out?: string
     }) => {
       if (options.format !== 'markdown' && options.format !== 'json') {
         program.error(`--format must be markdown or json (got ${options.format})`)
+      }
+      if (options.workingTree && options.after) {
+        program.error('--working-tree verifies uncommitted changes; do not also pass --after')
+      }
+      if (!options.workingTree && !options.after) {
+        program.error('--after is required (or use --working-tree for uncommitted changes)')
+      }
+      const testTimeoutMs = Number(options.testTimeout)
+      if (!Number.isFinite(testTimeoutMs) || testTimeoutMs <= 0) {
+        program.error(`--test-timeout must be a positive number of milliseconds (got ${options.testTimeout})`)
       }
 
       let contractText: string
@@ -95,7 +111,10 @@ program
       const report = await verifyChange({
         repo: path.resolve(options.cwd),
         before: options.before,
-        after: options.after,
+        after: options.workingTree ? undefined : options.after,
+        mode: options.workingTree ? 'working-tree' : 'refs',
+        runTests: !options.skipTests,
+        testTimeoutMs,
         contract: contractText,
       })
 
@@ -107,9 +126,7 @@ program
       }
 
       const regressions = report.threeQuestions.regressions
-      const regressionsLabel =
-        regressions.status === 'not-verified' ? 'not-verified (M2)' : regressions.status
-      const verdictLine = `regression-guard: ${report.verdict} — accomplished: ${report.threeQuestions.accomplished}, in-scope: ${report.threeQuestions.withinScope}, regressions: ${regressionsLabel}`
+      const verdictLine = `regression-guard: ${report.verdict} — accomplished: ${report.threeQuestions.accomplished}, in-scope: ${report.threeQuestions.withinScope}, regressions: ${regressions.status}${regressions.regressionsFound ? ` (${regressions.regressionsFound})` : ''}`
       process.stderr.write(`${VERDICT_COLOR[report.verdict](verdictLine)}\n`)
 
       process.exitCode = report.verdict === 'ACCEPT' || report.verdict === 'WARN' ? 0 : 1

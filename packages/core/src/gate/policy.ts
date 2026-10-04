@@ -17,6 +17,12 @@ export const DEFAULT_POLICY: Record<FindingClass, PolicyAction> = {
   'deleted-test': 'review',
   'sensitive-file-changed': 'review',
   'unfulfilled-contract': 'review',
+  // Deterministic PASS -> FAIL transitions reject by default. Pre-existing
+  // failures and incomplete baselines are visible but must not independently
+  // worsen the gate verdict.
+  'test-regression': 'reject',
+  'pre-existing-failure': 'accept',
+  'baseline-incomplete': 'accept',
 }
 
 const ACTION_RANK: Record<PolicyAction, number> = {

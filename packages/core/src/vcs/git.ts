@@ -101,4 +101,68 @@ export class GitAdapter {
       return null
     }
   }
+
+  /** Untracked, non-ignored file paths in the working tree. */
+  async listUntracked(): Promise<string[]> {
+    const output = await runGit(this.repoRoot, ['ls-files', '--others', '--exclude-standard', '-z'])
+    return output.split('\0').filter((path) => path.length > 0)
+  }
+
+  /**
+   * ChangeSet between a ref and the current working tree (staged + unstaged
+   * tracked changes plus untracked files). Never mutates anything.
+   */
+  async diffWorkingTree(before: string): Promise<ChangeSet> {
+    const [beforeSha, headSha] = await Promise.all([this.revParse(before), this.revParse('HEAD')])
+    const nameStatus = await runGit(this.repoRoot, ['diff', '--name-status', '-M', '-z', before])
+    const records: ChangeRecord[] = parseNameStatus(nameStatus).map((entry) => ({
+      path: entry.path,
+      oldPath: entry.oldPath,
+      status: entry.status,
+      binary: false,
+      hunks: [],
+      addedLines: 0,
+      removedLines: 0,
+      categories: [],
+    }))
+
+    const known = new Set(records.map((record) => record.path))
+    for (const path of await this.listUntracked()) {
+      if (known.has(path)) {
+        continue
+      }
+      records.push({
+        path,
+        status: 'created',
+        binary: false,
+        hunks: [],
+        addedLines: 0,
+        removedLines: 0,
+        categories: [],
+      })
+    }
+
+    records.sort((left, right) => left.path.localeCompare(right.path))
+    return { before, after: 'working-tree', beforeSha, afterSha: headSha, records }
+  }
+
+  /**
+   * Materialize a ref into an isolated worktree at `dir` without touching the
+   * current checkout. The caller owns cleanup via removeWorktree().
+   */
+  async createWorktree(dir: string, ref: string): Promise<void> {
+    await runGit(this.repoRoot, ['worktree', 'add', '--detach', '--force', dir, ref])
+  }
+
+  async removeWorktree(dir: string): Promise<void> {
+    try {
+      await runGit(this.repoRoot, ['worktree', 'remove', '--force', dir])
+    } catch {
+      try {
+        await runGit(this.repoRoot, ['worktree', 'prune'])
+      } catch {
+        // Best effort; the temp directory removal below is the safety net.
+      }
+    }
+  }
 }
