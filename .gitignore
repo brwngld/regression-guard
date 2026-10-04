@@ -16,7 +16,12 @@ dist-ssr
 .vscode/*
 !.vscode/extensions.json
 .idea
+.zcode/
+.video_agent/
 .DS_Store
+
+# Regression Guard caches
+.regression-guard/
 *.suo
 *.ntvs*
 *.njsproj
