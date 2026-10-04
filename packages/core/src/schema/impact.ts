@@ -93,7 +93,15 @@ export const ImpactAssessmentSchema = z.object({
   affected: z.array(ImpactNodeSchema).default([]),
   affectedTests: z.array(AffectedTestSchema).default([]),
   coverage: CoverageReviewSchema,
+  /**
+   * Unresolved relationships originating inside the impact region: from a
+   * changed seed or a node the traversal reached, in the graph that traversal
+   * used (deletions consult the BEFORE region, modifications/creations the
+   * AFTER region, renames both). Only these can make completeness partial.
+   */
   unresolvedEdges: z.array(UnresolvedEdgeSchema).default([]),
+  /** All unresolved relationships found in the repository graphs, impact-relevant or not. */
+  repositoryUnresolvedEdges: z.array(UnresolvedEdgeSchema).default([]),
   completeness: ImpactCompletenessSchema,
   predictionReview: PredictionReviewSchema.optional(),
 })

@@ -431,25 +431,189 @@ describe('computeImpact completeness', () => {
       specifier: 'legacy-module',
       kind: 'dynamic-import',
     }
+    const beforeOnlyEdge: UnresolvedEdge = {
+      from: 'src/island.ts',
+      specifier: './gone',
+      kind: 'unresolved-import',
+    }
     const after = graph(
       [
         node('src/a.ts', 'source'),
         node('src/b.ts', 'source', ['src/a.ts']),
       ],
-      [importEdge],
+      // Both edges originate inside the after impact region (seed + reached).
+      [importEdge, dynamicEdge],
     )
     const before = graph(
       [
         node('src/a.ts', 'source'),
         node('src/b.ts', 'source', ['src/a.ts']),
+        node('src/island.ts', 'source'),
       ],
-      // Duplicate of the after edge plus one before-only edge.
-      [dynamicEdge, importEdge],
+      // Duplicate of an after edge (deduped away) plus one edge from a node
+      // the before traversal never reaches (modified seed → no before roots).
+      [dynamicEdge, importEdge, beforeOnlyEdge],
     )
 
     const result = computeImpact([seed('src/a.ts')], { after, before })
     expect(result.completeness).toBe('partial')
     expect(result.unresolvedEdges).toEqual([importEdge, dynamicEdge])
+    expect(result.repositoryUnresolvedEdges).toEqual([importEdge, dynamicEdge, beforeOnlyEdge])
+  })
+
+  it('treats an unresolved-import edge from an impacted (reached) node as impact-relevant', () => {
+    const edge: UnresolvedEdge = { from: 'src/b.ts', specifier: './missing', kind: 'unresolved-import' }
+    const after = graph(
+      [node('src/a.ts', 'source'), node('src/b.ts', 'source', ['src/a.ts'])],
+      [edge],
+    )
+    const result = computeImpact([seed('src/a.ts')], { after })
+    expect(result.completeness).toBe('partial')
+    expect(result.unresolvedEdges).toEqual([edge])
+    expect(result.repositoryUnresolvedEdges).toEqual([edge])
+  })
+
+  it('treats a computed dynamic-import edge from an impacted node as impact-relevant', () => {
+    const edge: UnresolvedEdge = { from: 'src/b.ts', specifier: '(computed)', kind: 'dynamic-import' }
+    const after = graph(
+      [node('src/a.ts', 'source'), node('src/b.ts', 'source', ['src/a.ts'])],
+      [edge],
+    )
+    const result = computeImpact([seed('src/a.ts')], { after })
+    expect(result.completeness).toBe('partial')
+    expect(result.unresolvedEdges).toEqual([edge])
+  })
+
+  it('stays complete for unresolved edges from nodes outside the impact region', () => {
+    const islandEdge: UnresolvedEdge = {
+      from: 'src/island.ts',
+      specifier: './missing',
+      kind: 'unresolved-import',
+    }
+    const after = graph(
+      [node('src/a.ts', 'source'), node('src/island.ts', 'source')],
+      [islandEdge],
+    )
+    const result = computeImpact([seed('src/a.ts')], { after })
+    // The island is neither a seed nor reached: its uncertainty cannot make
+    // the whole assessment partial, but it stays visible repository-wide.
+    expect(result.completeness).toBe('complete')
+    expect(result.unresolvedEdges).toEqual([])
+    expect(result.repositoryUnresolvedEdges).toEqual([islandEdge])
+  })
+
+  it('evaluates deletions against the traversed BEFORE region', () => {
+    const edge: UnresolvedEdge = { from: 'src/util.ts', specifier: './missing', kind: 'unresolved-import' }
+    const before = graph(
+      [
+        node('src/old.ts', 'source'),
+        node('src/util.ts', 'source', ['src/old.ts']),
+        node('src/main.ts', 'source', ['src/util.ts']),
+      ],
+      [edge],
+    )
+    const after = graph([
+      node('src/util.ts', 'source'),
+      node('src/main.ts', 'source', ['src/util.ts']),
+    ])
+    // util.ts is reached only via the before traversal; the before-graph edge
+    // from it is impact-relevant even though nothing about it exists after.
+    const result = computeImpact([seed('src/old.ts', 'deleted')], { after, before })
+    expect(result.completeness).toBe('partial')
+    expect(result.unresolvedEdges).toEqual([edge])
+    expect(result.repositoryUnresolvedEdges).toEqual([edge])
+  })
+
+  it('ignores an after-graph edge from an unreached node for deletions (before region only)', () => {
+    const edge: UnresolvedEdge = { from: 'src/util.ts', specifier: './missing', kind: 'unresolved-import' }
+    const before = graph([
+      node('src/old.ts', 'source'),
+      node('src/util.ts', 'source', ['src/old.ts']),
+      node('src/main.ts', 'source', ['src/util.ts']),
+    ])
+    // Same-shaped edge, but present ONLY in the after graph: the deletion
+    // traversal never visits the after graph, so the pairing (edge graph,
+    // node origin) fails and the edge is not impact-relevant.
+    const after = graph(
+      [
+        node('src/util.ts', 'source'),
+        node('src/main.ts', 'source', ['src/util.ts']),
+      ],
+      [edge],
+    )
+    const result = computeImpact([seed('src/old.ts', 'deleted')], { after, before })
+    expect(result.completeness).toBe('complete')
+    expect(result.unresolvedEdges).toEqual([])
+    expect(result.repositoryUnresolvedEdges).toEqual([edge])
+  })
+
+  it('evaluates renames against both regions — a before-side edge alone flips completeness', () => {
+    const beforeEdge: UnresolvedEdge = {
+      from: 'src/before-importer.ts',
+      specifier: './gone',
+      kind: 'unresolved-import',
+    }
+    const before = graph(
+      [
+        node('src/old.ts', 'source'),
+        node('src/before-importer.ts', 'source', ['src/old.ts']),
+      ],
+      [beforeEdge],
+    )
+    const after = graph([node('src/new.ts', 'source')])
+    const result = computeImpact([seed('src/new.ts', 'renamed', 'src/old.ts')], { after, before })
+    // before-importer.ts is reached only via the old path in the BEFORE graph;
+    // that alone is enough to make the rename assessment partial.
+    expect(result.completeness).toBe('partial')
+    expect(result.unresolvedEdges).toEqual([beforeEdge])
+    expect(result.repositoryUnresolvedEdges).toEqual([beforeEdge])
+  })
+
+  it('evaluates renames against both regions — an after-side edge alone flips completeness', () => {
+    const afterEdge: UnresolvedEdge = {
+      from: 'src/after-importer.ts',
+      specifier: './gone',
+      kind: 'unresolved-import',
+    }
+    const before = graph([node('src/old.ts', 'source')])
+    const after = graph(
+      [
+        node('src/new.ts', 'source'),
+        node('src/after-importer.ts', 'source', ['src/new.ts']),
+      ],
+      [afterEdge],
+    )
+    const result = computeImpact([seed('src/new.ts', 'renamed', 'src/old.ts')], { after, before })
+    // after-importer.ts is reached only via the new path in the AFTER graph;
+    // that alone is enough to make the rename assessment partial.
+    expect(result.completeness).toBe('partial')
+    expect(result.unresolvedEdges).toEqual([afterEdge])
+    expect(result.repositoryUnresolvedEdges).toEqual([afterEdge])
+  })
+
+  it('is deterministic across repeat calls including both edge populations', () => {
+    const reachedEdge: UnresolvedEdge = {
+      from: 'src/b.ts',
+      specifier: './missing',
+      kind: 'unresolved-import',
+    }
+    const islandEdge: UnresolvedEdge = {
+      from: 'src/island.ts',
+      specifier: './missing',
+      kind: 'unresolved-import',
+    }
+    const buildGraphs = () => ({
+      after: graph(
+        [node('src/a.ts', 'source'), node('src/b.ts', 'source', ['src/a.ts']), node('src/island.ts', 'source')],
+        [reachedEdge, islandEdge],
+      ),
+      before: graph([node('src/a.ts', 'source')], [reachedEdge]),
+    })
+    const first = computeImpact([seed('src/a.ts')], buildGraphs())
+    const second = computeImpact([seed('src/a.ts')], buildGraphs())
+    expect(first).toEqual(second)
+    expect(first.unresolvedEdges).toEqual([reachedEdge])
+    expect(first.repositoryUnresolvedEdges).toEqual([reachedEdge, islandEdge])
   })
 
   it('stays complete without unresolved edges', () => {
@@ -457,5 +621,6 @@ describe('computeImpact completeness', () => {
     const result = computeImpact([seed('src/a.ts')], { after })
     expect(result.completeness).toBe('complete')
     expect(result.unresolvedEdges).toEqual([])
+    expect(result.repositoryUnresolvedEdges).toEqual([])
   })
 })

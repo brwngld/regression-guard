@@ -109,9 +109,24 @@ export function renderMarkdownReport(report: VerificationReport): string {
     push(
       `- **Impact coverage:** ${impact.coverage.coveragePercent}% — ${impact.coverage.coveredAreas} covered, ${impact.coverage.uncoveredAreas} uncovered affected area(s)`,
     )
-    push(
-      `- **Graph completeness:** ${impact.completeness === 'complete' ? 'COMPLETE' : `PARTIAL — ${impact.unresolvedEdges.length} unresolved edge(s) (unresolved imports or computed dynamic imports)`}`,
-    )
+    // Graph completeness distinguishes the two unresolved-edge populations:
+    // only impact-relevant edges (from seeds or traversal-reached nodes) can
+    // make the assessment partial; repository-wide edges outside the impact
+    // region are reported as a note, not as uncertainty about this change.
+    const relevantUnresolved = impact.unresolvedEdges.length
+    const repositoryUnresolved = impact.repositoryUnresolvedEdges.length
+    let completenessLine: string
+    if (impact.completeness === 'partial') {
+      completenessLine = `PARTIAL — ${relevantUnresolved} impact-relevant unresolved relationship(s)`
+      if (repositoryUnresolved > relevantUnresolved) {
+        completenessLine += ` of ${repositoryUnresolved} repository-wide`
+      }
+    } else if (repositoryUnresolved > 0) {
+      completenessLine = `COMPLETE — repository has ${repositoryUnresolved} unrelated unresolved relationship(s)`
+    } else {
+      completenessLine = 'COMPLETE'
+    }
+    push(`- **Graph completeness:** ${completenessLine}`)
     push('')
 
     const blastRadius = impact.affected
@@ -200,7 +215,7 @@ export function renderMarkdownReport(report: VerificationReport): string {
 
   push('---', '')
   push(
-    '_Regression Guard verifies changes against their contract. Question 3 is answered honestly as NOT VERIFIED until the Baseline Engine ships._',
+    '_Regression Guard distinguishes scope, regression verification, and impact analysis, and reports uncertainty explicitly rather than treating unknown states as safe: what cannot be verified stays NOT VERIFIED._',
     '',
   )
 

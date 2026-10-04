@@ -395,14 +395,36 @@ export function computeImpact(seeds: ImpactSeed[], graphs: ImpactGraphs): Impact
   const coveragePercent =
     population.length === 0 ? 100 : Math.round((covered.length / population.length) * 1000) / 10
 
-  const unresolvedEdges: UnresolvedEdge[] = []
+  // Repository-wide population: every unresolved relationship the graphs
+  // found, deduped (after first, then before-only), deterministic order.
+  const edgeKey = (edge: UnresolvedEdge): string => `${edge.kind}|${edge.from}|${edge.specifier}`
+  const afterEdgeKeys = new Set(unresolvedEdgesOf(after).map(edgeKey))
+  const beforeEdgeKeys = new Set(unresolvedEdgesOf(before).map(edgeKey))
+  const repositoryUnresolvedEdges: UnresolvedEdge[] = []
   const seenEdges = new Set<string>()
   for (const edge of [...unresolvedEdgesOf(after), ...unresolvedEdgesOf(before)]) {
-    const key = `${edge.kind}|${edge.from}|${edge.specifier}`
+    const key = edgeKey(edge)
     if (seenEdges.has(key)) continue
     seenEdges.add(key)
-    unresolvedEdges.push(edge)
+    repositoryUnresolvedEdges.push(edge)
   }
+
+  // Impact relevance: an unresolved edge can only hide affected code when it
+  // originates from a changed seed or a node the impact traversal actually
+  // reached, IN THE SAME GRAPH the edge was found in. The per-node `origins`
+  // accumulated above are exactly that oracle — deletions evaluate against
+  // the traversed BEFORE region, modifications/creations against AFTER,
+  // renames against both — with zero changes to the traversal itself. Edges
+  // elsewhere in the repository stay visible in repositoryUnresolvedEdges
+  // but cannot make the assessment partial.
+  const unresolvedEdges = repositoryUnresolvedEdges.filter((edge) => {
+    const origins = accumulated.get(edge.from)?.origins
+    if (origins === undefined) return false
+    return (
+      (afterEdgeKeys.has(edgeKey(edge)) && origins.has('after')) ||
+      (beforeEdgeKeys.has(edgeKey(edge)) && origins.has('before'))
+    )
+  })
 
   return {
     seeds: sortedUnique(
@@ -419,6 +441,7 @@ export function computeImpact(seeds: ImpactSeed[], graphs: ImpactGraphs): Impact
       uncovered,
     },
     unresolvedEdges,
+    repositoryUnresolvedEdges,
     completeness: unresolvedEdges.length > 0 ? ('partial' as const) : ('complete' as const),
   }
 }

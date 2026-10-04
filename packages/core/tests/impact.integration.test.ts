@@ -131,6 +131,40 @@ console.log(x)
     expect(report.markdown).toContain('PARTIAL')
     await repo.destroy()
   })
+
+  it('stays complete when an unresolved import sits outside the impact region', async () => {
+    // The dodgy file is committed at BASE: it is not part of the change and
+    // nothing in the blast radius touches it, so its unresolved import must
+    // not make the assessment partial — only visible repository-wide.
+    const repo = await TempRepo.create({
+      ...CHAIN_APP,
+      'src/dodgy.js': `import x from './missing.js'
+
+console.log(x)
+`,
+    })
+    await repo.git('branch', 'base')
+    await repo.write({ 'src/lib/auth.js': 'export const auth = false\n' })
+    await repo.commit('change auth only')
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: PERMISSIVE('src/lib/auth.js'),
+    })
+
+    expect(report.impact?.completeness).toBe('complete')
+    expect(report.impact?.unresolvedEdges).toEqual([])
+    expect(report.impact?.repositoryUnresolvedEdges.length).toBeGreaterThanOrEqual(1)
+    expect(report.impact?.repositoryUnresolvedEdges).toContainEqual({
+      from: 'src/dodgy.js',
+      specifier: './missing.js',
+      kind: 'unresolved-import',
+    })
+    expect(report.markdown).toContain('unrelated unresolved relationship')
+    await repo.destroy()
+  })
 })
 
 describe('M3: deletion and rename semantics', () => {
