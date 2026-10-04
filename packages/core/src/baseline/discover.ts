@@ -40,6 +40,29 @@ export function packageJsonHasDependencies(pkgText: string | null): boolean {
   }
 }
 
+export interface DependencyInstallPlan {
+  strategy: 'npm-ci' | 'npm-install' | 'none'
+  command: string | null
+}
+
+/**
+ * Deterministic dependency-restoration strategy. `npm ci` (lockfile-exact, no
+ * mutation) is preferred whenever a lockfile exists; `npm install` is the
+ * fallback for lockfile-less repositories; nothing runs when there are no
+ * declared dependencies to restore.
+ */
+export function selectDependencyInstall(
+  pkgText: string | null,
+  lockfileExists: boolean,
+): DependencyInstallPlan {
+  if (!packageJsonHasDependencies(pkgText)) {
+    return { strategy: 'none', command: null }
+  }
+  return lockfileExists
+    ? { strategy: 'npm-ci', command: 'npm ci --no-audit --no-fund --loglevel=error' }
+    : { strategy: 'npm-install', command: 'npm install --no-audit --no-fund --loglevel=error' }
+}
+
 export function discoverTestCommand(pkgText: string | null): TestCommandPlan {
   if (pkgText === null) {
     return null

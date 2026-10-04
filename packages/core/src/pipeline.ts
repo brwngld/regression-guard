@@ -85,6 +85,7 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
       before: { ref: input.before },
       after: mode === 'working-tree' ? { workingTree: true } : { ref: input.after ?? 'HEAD' },
       workingTreeChanges: mode === 'working-tree' ? changeSet.records : undefined,
+      workingTree: mode === 'working-tree' ? changeSet.workingTree : undefined,
       timeoutMs: input.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS,
     })
     regressions = outcome.regressions
@@ -152,6 +153,9 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
   }
   if (baseline !== undefined) {
     report.baseline = baseline
+  }
+  if (changeSet.workingTree !== undefined) {
+    report.workingTree = changeSet.workingTree
   }
 
   return { ...report, markdown: renderMarkdownReport(report), json: JSON.stringify(report, null, 2) }

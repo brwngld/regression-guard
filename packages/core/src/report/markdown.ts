@@ -43,9 +43,16 @@ export function renderMarkdownReport(report: VerificationReport): string {
   const lines: string[] = []
   const push = (...text: string[]) => lines.push(...text)
 
+  // Working-tree mode compares HEAD plus a dirty overlay: no after SHA exists,
+  // so the deterministic state fingerprint identifies what was verified.
+  const compared =
+    report.workingTree !== undefined
+      ? `\`${report.before}\` (${report.beforeSha.slice(0, 10)}) → working-tree (base ${report.workingTree.baseSha.slice(0, 10)}, ${report.workingTree.fingerprint.slice(0, 19)}…)`
+      : `\`${report.before}\` (${report.beforeSha.slice(0, 10)}) → \`${report.after}\` (${report.afterSha === null ? '' : report.afterSha.slice(0, 10)})`
+
   push('# Change Integrity Report', '')
   push(`- **Contract:** ${report.contractId} — ${report.goal}`)
-  push(`- **Compared:** \`${report.before}\` (${report.beforeSha.slice(0, 10)}) → \`${report.after}\` (${report.afterSha.slice(0, 10)})`)
+  push(`- **Compared:** ${compared}`)
   push(`- **Generated:** ${report.generatedAt}`)
   push('', '---', '')
   push(`## Verdict: ${report.verdict}`, '')
@@ -79,7 +86,11 @@ export function renderMarkdownReport(report: VerificationReport): string {
     push('### Regression verification (baseline engine)', '')
     push(`- **Test command:** \`${b.userCommand}\`${b.perTest ? '' : ' (suite-level outcomes — runner did not provide individual test results)'}`)
     push(`- **Before:** \`${b.before.ref}\` (${b.before.sha.slice(0, 10)}) — exit ${b.before.exitCode ?? 'n/a'}, ${Math.round(b.before.durationMs / 100) / 10}s, ${b.before.tests.length} test(s)`)
-    push(`- **After:** \`${b.after.ref}\` (${b.after.sha.slice(0, 10)}) — exit ${b.after.exitCode ?? 'n/a'}, ${Math.round(b.after.durationMs / 100) / 10}s, ${b.after.tests.length} test(s)`)
+    const afterIdentity =
+      b.after.fingerprint !== undefined
+        ? `${b.after.sha.slice(0, 10)}, ${b.after.fingerprint.slice(0, 19)}…`
+        : b.after.sha.slice(0, 10)
+    push(`- **After:** \`${b.after.ref}\` (${afterIdentity}) — exit ${b.after.exitCode ?? 'n/a'}, ${Math.round(b.after.durationMs / 100) / 10}s, ${b.after.tests.length} test(s)`)
     const s = b.summary
     push(`- **Transitions:** ${s.preserved} preserved, **${s.regressed} regressed**, ${s.preExisting} pre-existing, ${s.improved} improved, ${s.unknown} inconclusive.`)
     push(`- **Executed:** \`${b.executedCommand}\` in isolated worktrees; the working checkout was not touched.`, '')

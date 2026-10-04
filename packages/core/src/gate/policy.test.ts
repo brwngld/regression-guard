@@ -36,6 +36,11 @@ describe('applyPolicy', () => {
     expect(DEFAULT_POLICY['new-dependency']).toBe('review')
   })
 
+  it('accepts test-command-changed findings without worsening the verdict', () => {
+    expect(DEFAULT_POLICY['test-command-changed']).toBe('accept')
+    expect(applyPolicy([findingOf('test-command-changed')]).verdict).toBe('ACCEPT')
+  })
+
   it('falls back to warn for findings from a future schema version', () => {
     // Finding.findingClass is a closed enum now; this cast simulates a
     // deserialized report from a newer engine being re-gated, which the

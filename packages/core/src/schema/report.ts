@@ -56,7 +56,12 @@ export const VerificationReportSchema = z.object({
   before: z.string(),
   after: z.string(),
   beforeSha: z.string(),
-  afterSha: z.string(),
+  // Null in working-tree mode — the tested state is HEAD plus a dirty overlay,
+  // which no commit SHA identifies.
+  afterSha: z.string().nullable(),
+  // Present only in working-tree mode; fingerprint deterministically identifies
+  // the materialized dirty state.
+  workingTree: z.object({ baseSha: z.string(), fingerprint: z.string() }).optional(),
   threeQuestions: ThreeQuestionsSchema,
   verdict: VerdictSchema,
   triggeredActions: z.array(z.string()).default([]),

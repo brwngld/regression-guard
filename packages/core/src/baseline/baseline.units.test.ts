@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { discoverTestCommand, packageJsonHasDependencies } from './discover'
+import { discoverTestCommand, packageJsonHasDependencies, selectDependencyInstall } from './discover'
 import { parseRunnerJson } from './parse'
 import { classifyPerTest, classifySuite, suiteStatusOf, summarize } from './compare'
 
@@ -45,6 +45,44 @@ describe('discoverTestCommand', () => {
     expect(packageJsonHasDependencies(JSON.stringify({}))).toBe(false)
     expect(packageJsonHasDependencies(JSON.stringify({ devDependencies: { vitest: '^5' } }))).toBe(true)
     expect(packageJsonHasDependencies(JSON.stringify({ dependencies: {} }))).toBe(false)
+  })
+})
+
+describe('selectDependencyInstall', () => {
+  const WITH_DEPS = JSON.stringify({ dependencies: { vitest: '^5' } })
+
+  it.each([
+    {
+      case: 'no package.json at all',
+      pkgText: null,
+      lockfileExists: true,
+      expected: { strategy: 'none', command: null },
+    },
+    {
+      case: 'package.json declares no dependencies',
+      pkgText: JSON.stringify({ name: 'depless', version: '1.0.0' }),
+      lockfileExists: true,
+      expected: { strategy: 'none', command: null },
+    },
+    {
+      case: 'dependencies plus a lockfile',
+      pkgText: WITH_DEPS,
+      lockfileExists: true,
+      expected: { strategy: 'npm-ci', command: 'npm ci --no-audit --no-fund --loglevel=error' },
+    },
+    {
+      case: 'dependencies without a lockfile',
+      pkgText: WITH_DEPS,
+      lockfileExists: false,
+      expected: { strategy: 'npm-install', command: 'npm install --no-audit --no-fund --loglevel=error' },
+    },
+  ])('selects deterministically: $case', ({ pkgText, lockfileExists, expected }) => {
+    expect(selectDependencyInstall(pkgText, lockfileExists)).toEqual(expected)
+  })
+
+  it('never runs an install command when nothing is declared', () => {
+    expect(selectDependencyInstall(JSON.stringify({ dependencies: {} }), true).command).toBeNull()
+    expect(selectDependencyInstall('not json', true).command).toBeNull()
   })
 })
 

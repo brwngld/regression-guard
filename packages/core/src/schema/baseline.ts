@@ -35,6 +35,15 @@ export const TestRunResultSchema = z.object({
   stdoutSummary: z.string(),
   stderrSummary: z.string(),
   tests: z.array(TestCaseOutcomeSchema).default([]),
+  /** Working-tree state fingerprint (after-run in working-tree mode only). */
+  fingerprint: z.string().optional(),
+  /** How dependencies were restored before this run. */
+  dependencyInstall: z.object({
+    strategy: z.enum(['npm-ci', 'npm-install', 'none']),
+    command: z.string(),
+    exitCode: z.number().int().nullable(),
+    durationMs: z.number().int(),
+  }).optional(),
 })
 export type TestRunResult = z.infer<typeof TestRunResultSchema>
 

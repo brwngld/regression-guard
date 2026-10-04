@@ -23,6 +23,9 @@ export const DEFAULT_POLICY: Record<FindingClass, PolicyAction> = {
   'test-regression': 'reject',
   'pre-existing-failure': 'accept',
   'baseline-incomplete': 'accept',
+  // Visible but never independently worsens the verdict; paired with a forced
+  // `partial` regressions status when the test command changes across refs.
+  'test-command-changed': 'accept',
 }
 
 const ACTION_RANK: Record<PolicyAction, number> = {

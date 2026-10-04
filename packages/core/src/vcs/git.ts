@@ -1,5 +1,6 @@
 import type { ChangeSet, ChangeRecord } from '../schema/changeset'
 import { runGit } from './exec'
+import { workingTreeFingerprint } from './fingerprint'
 import { parseNameStatus, parseUnifiedDiff } from './parse'
 
 /**
@@ -110,7 +111,10 @@ export class GitAdapter {
 
   /**
    * ChangeSet between a ref and the current working tree (staged + unstaged
-   * tracked changes plus untracked files). Never mutates anything.
+   * tracked changes plus untracked files). Never mutates anything. The tested
+   * state is HEAD plus a dirty overlay, which no commit SHA identifies: the
+   * fingerprint over the final records (including untracked files) is its
+   * deterministic identity.
    */
   async diffWorkingTree(before: string): Promise<ChangeSet> {
     const [beforeSha, headSha] = await Promise.all([this.revParse(before), this.revParse('HEAD')])
@@ -143,7 +147,15 @@ export class GitAdapter {
     }
 
     records.sort((left, right) => left.path.localeCompare(right.path))
-    return { before, after: 'working-tree', beforeSha, afterSha: headSha, records }
+    const fingerprint = await workingTreeFingerprint(this, records)
+    return {
+      before,
+      after: 'working-tree',
+      beforeSha,
+      afterSha: null,
+      workingTree: { baseSha: headSha, fingerprint },
+      records,
+    }
   }
 
   /**

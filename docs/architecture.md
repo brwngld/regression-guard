@@ -238,6 +238,22 @@ Every execution runs under a hard timeout with process-tree kill and capped
 output capture — test runners hang, servers stay alive, and children spawn
 children, so the execution boundary is enforced from day one.
 
+**Reproducibility hardening (M2.1):**
+
+- **Working-tree identity** — no commit SHA can identify HEAD-plus-dirty-overlay,
+  so working-tree mode reports `afterSha: null` with an explicit
+  `{ baseSha, fingerprint }` identity; the fingerprint deterministically hashes
+  the materialized changed state (staged, unstaged, and untracked alike).
+- **Deterministic dependency restoration** — `npm ci` (lockfile-exact) whenever
+  a lockfile exists, `npm install` only as a lockfile-less fallback; the
+  strategy and outcome are recorded per run, and install failures report
+  `partial` with an environment-drift hint, never a silent pass.
+- **Test-plan comparability** — the declared test command is discovered
+  independently from each side's materialized `package.json`; when the plans
+  differ, each side runs its own command, a `test-command-changed` finding is
+  emitted, and the regression status is forced to `partial` — the after state
+  can never silently redefine what the baseline means.
+
 In M1, question 3 (regressions) is reported as **NOT VERIFIED** — honestly, until
 the Baseline Engine (M2) ships.
 

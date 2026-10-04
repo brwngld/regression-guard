@@ -58,6 +58,7 @@ export function severityForClass(findingClass: FindingClass | string): 'info' | 
     case 'changed-dependency':
     case 'pre-existing-failure':
     case 'baseline-incomplete':
+    case 'test-command-changed':
       return 'info'
     default:
       return 'warn'
