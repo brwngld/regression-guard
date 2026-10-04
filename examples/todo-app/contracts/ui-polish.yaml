@@ -1,0 +1,21 @@
+# Change contract: polish the to-do app's UI without touching behavior.
+#
+# Run the demo against this contract:
+#   npm run verify:demo
+id: todo-ui-polish
+goal: Polish the to-do app's visual styling without touching persistence behavior
+paths:
+  mustChange:
+    - "src/style.css"
+  mayChange:
+    - "index.html"
+    - "src/main.js"
+  mustPreserve:
+    - "src/tasks.js"
+    - "src/tasks.test.js"
+  prohibited:
+    - category: dependency-addition
+    - category: env-secrets
+acceptance:
+  - id: AC-1
+    description: Styling changes are confined to style.css and the markup that renders it.

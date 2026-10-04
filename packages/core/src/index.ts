@@ -1,0 +1,91 @@
+// Public API of the Regression Guard core engine.
+
+export {
+  SensitiveCategorySchema,
+  PathRuleSchema,
+  AcceptanceCriterionSchema,
+  FindingClassSchema,
+  PolicyActionSchema,
+  ContractPathsSchema,
+  ChangeContractSchema,
+  ContractValidationError,
+  parseContract,
+} from './schema/contract'
+export type {
+  SensitiveCategory,
+  PathRule,
+  AcceptanceCriterion,
+  FindingClass,
+  PolicyAction,
+  ChangeContract,
+} from './schema/contract'
+
+export {
+  ChangeStatusSchema,
+  HunkSummarySchema,
+  ChangeRecordSchema,
+  DependencyChangeSchema,
+  DependencyChangesSchema,
+  ChangeSetSchema,
+} from './schema/changeset'
+export type {
+  ChangeStatus,
+  HunkSummary,
+  ChangeRecord,
+  DependencyChange,
+  ChangeSet,
+  EnrichedRecord,
+  EnrichedChangeSet,
+} from './schema/changeset'
+
+export {
+  ScopeClassificationSchema,
+  PathAssessmentSchema,
+  ScopeAssessmentSchema,
+} from './schema/scope'
+export type { ScopeClassification, PathAssessment, ScopeAssessment } from './schema/scope'
+
+export { EvidenceSchema, FindingSchema, severityForClass } from './schema/evidence'
+export type { Evidence, Finding } from './schema/evidence'
+
+export { VerdictSchema, GateDecisionSchema } from './schema/gate'
+export type { Verdict, GateDecision } from './schema/gate'
+
+export {
+  ThreeQuestionsSchema,
+  ReportStatisticsSchema,
+  VerificationReportSchema,
+} from './schema/report'
+export type { ThreeQuestions, ReportStatistics, VerificationReport } from './schema/report'
+
+export { GitError } from './vcs/exec'
+export { GitAdapter } from './vcs/git'
+export { parseNameStatus, parseUnifiedDiff } from './vcs/parse'
+export type { RawStatusEntry, UnifiedSection } from './vcs/parse'
+
+export {
+  buildGraph,
+  collectJsImports,
+  isTestPath,
+} from './intel/graph'
+export type { FileKind, FileNode, DependencyGraph } from './intel/graph'
+export {
+  isRelativeSpecifier,
+  packageNameOf,
+  resolveSpecifier,
+  normalizePath,
+} from './intel/resolve'
+
+export { categorizePath, diffDependencies, enrichChangeSet } from './analyzer/change'
+export { analyzeScope } from './analyzer/scope'
+export type { ScopeResult } from './analyzer/scope'
+
+export { DEFAULT_POLICY, applyPolicy } from './gate/policy'
+
+export { renderMarkdownReport } from './report/markdown'
+
+export { verifyChange } from './pipeline'
+export type { VerifyInput, VerifyOutput } from './pipeline'
+
+export { nullAdvisor } from './advisor'
+export type { ContractAdvisor } from './advisor'

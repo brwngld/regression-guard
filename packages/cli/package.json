@@ -1,0 +1,23 @@
+{
+  "name": "@regression-guard/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "regression-guard CLI: verify a change against its contract.",
+  "bin": {
+    "regression-guard": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/cli.ts --format esm --clean --sourcemap",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@regression-guard/core": "0.1.0",
+    "commander": "^14.0.0",
+    "picocolors": "^1.1.1",
+    "yaml": "^2.8.0",
+    "zod": "^4.1.0"
+  }
+}

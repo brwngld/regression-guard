@@ -13,10 +13,11 @@
   },
   "scripts": {
     "build": "npm run build -w @regression-guard/core && npm run build -w @regression-guard/cli",
-    "test": "npm run build -w @regression-guard/core && npm run test --workspaces --if-present",
-    "verify:demo": "node scripts/demo.mjs"
+    "test": "npm run build && npm run test --workspaces --if-present",
+    "verify:demo": "npm run build && node scripts/demo.mjs"
   },
   "devDependencies": {
+    "@types/node": "^24.0.0",
     "tsup": "^8.5.0",
     "typescript": "^5.9.3",
     "vitest": "^5.0.3"
