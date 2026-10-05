@@ -76,18 +76,17 @@ export const ReproductionAttemptSchema = z.object({
   /** 1-based attempt number. */
   index: z.number().int(),
   /**
-   * Per-attempt attribution (M4.1): the experiment this attempt belongs to.
-   * Optional only for backward compatibility with pre-M4.1 persisted
-   * assessments — the reproduction engine records it on EVERY attempt.
+   * Per-attempt attribution (M4.1, required since M4.2): the experiment this
+   * attempt belongs to. Required by the schema itself — every schema-valid
+   * attempt is independently attributable, not just engine-emitted ones.
    */
-  experimentId: z.string().optional(),
+  experimentId: z.string(),
   /**
-   * Per-attempt attribution (M4.1): the recorded state identity this attempt
-   * executed against (for attempts that never executed, the identity that
-   * failed verification — the reason is in `detail`). Optional only for
-   * backward compatibility; the engine records it on EVERY attempt.
+   * Per-attempt attribution (required since M4.2): the recorded state identity
+   * this attempt executed against (for attempts that never executed, the
+   * identity that failed verification — the reason is in `detail`).
    */
-  stateIdentity: StateIdentitySchema.optional(),
+  stateIdentity: StateIdentitySchema,
   outcome: AttemptOutcomeSchema,
   exitCode: z.number().int().nullable(),
   durationMs: z.number().int(),

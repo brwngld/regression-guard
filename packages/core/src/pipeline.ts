@@ -1,5 +1,3 @@
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import picomatch from 'picomatch'
 import { enrichChangeSet } from './analyzer/change'
@@ -17,9 +15,9 @@ import type { ReproductionAssessment, StateIdentity } from './schema/reproductio
 import { REPORT_SCHEMA_VERSION } from './schema/report'
 import type { VerificationReport } from './schema/report'
 import { runBaselineVerification } from './baseline/runner'
-import { discoverTestCommand, packageJsonHasDependencies } from './baseline/discover'
 import {
   buildExperiments,
+  deriveReproductionTestPlan,
   runExperiments,
   type AssessmentWithDetail,
   type ExperimentContext,
@@ -186,26 +184,14 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
           timeoutMs: input.reproduction?.timeoutMs ?? contract.reproduction.timeoutMs,
         }
   if (reproductionConfig !== null && findings.length > 0) {
-    // Re-derive the test plan deterministically from the after state, read
-    // exactly as the baseline runner reads it.
-    const afterPkgText =
-      mode === 'working-tree'
-        ? await readFile(join(git.repoRoot, 'package.json'), 'utf8').catch(() => null)
-        : await git.readFileAt(input.after ?? 'HEAD', 'package.json')
-    const plan = discoverTestCommand(afterPkgText)
+    // M4.2: the reproduction plan is derived from the RECORDED immutable after
+    // state (recorded SHA, or base SHA + verified fingerprint) — a movable
+    // label can never redefine what the experiment means.
     const experimentContext: ExperimentContext = {
       git,
       before: beforeState,
       after: afterState,
-      testPlan:
-        plan === null
-          ? null
-          : {
-              runner: plan.runner,
-              userCommand: plan.userCommand,
-              buildExecutedCommand: plan.buildExecutedCommand,
-              testCommandInstalled: packageJsonHasDependencies(afterPkgText),
-            },
+      testPlan: await deriveReproductionTestPlan(git, beforeState, afterState),
       config: reproductionConfig,
     }
     const experiments = buildExperiments(findings, experimentContext)

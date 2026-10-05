@@ -96,7 +96,17 @@ function reproductionOf(experimentId: string): ReproductionAssessment {
     inconclusive: 0,
     stability: 'stable',
     granularity: 'case',
-    attempts: [{ index: 1, outcome: 'reproduced', exitCode: 1, durationMs: 12, timedOut: false }],
+    attempts: [
+      {
+        index: 1,
+        experimentId,
+        stateIdentity: STATE_AFTER,
+        outcome: 'reproduced',
+        exitCode: 1,
+        durationMs: 12,
+        timedOut: false,
+      },
+    ],
     stateIdentity: STATE_AFTER,
     stateMatched: true,
   }

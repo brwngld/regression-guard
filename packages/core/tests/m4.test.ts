@@ -3,9 +3,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { verifyChange } from '../src/pipeline'
-import { buildExperiments, runExperiments, type ExperimentContext } from '../src/reproduction/engine'
+import {
+  buildExperiments,
+  deriveReproductionTestPlan,
+  runExperiments,
+  type ExperimentContext,
+} from '../src/reproduction/engine'
+import { ReproductionAttemptSchema } from '../src/schema/reproduction'
 import { GitAdapter } from '../src/vcs/git'
-import { TempRepo } from './helpers/repo'
+import { TempRepo, fakeVitestApp, PASSING_SPECS } from './helpers/repo'
 
 /**
  * M4/M4.1 integration: reproduction, stability accounting, state identity,
@@ -476,5 +482,144 @@ describe('M4: evidence package and repair proposal', () => {
     expect(report.evidencePackage?.reproductions).toEqual([])
     expect(report.evidencePackage?.repairProposal.status).toBe('proposed')
     await repo.destroy()
+  })
+})
+
+describe('M4.2: reproduction plan derives from immutable state, not labels', () => {
+  it('a moved branch with a different runner cannot redefine the recorded experiment (B=vitest, label now at C=jest)', async () => {
+    // B (the recorded violating state) declares vitest; the feat label is then
+    // moved to C, whose package.json declares jest. Plan derivation from the
+    // RECORDED identity must still yield B's vitest plan — deriving from the
+    // label would hand the experiment to a runner that B never declared.
+    const repo = await TempRepo.create(fakeVitestApp(PASSING_SPECS))
+    await repo.markExecutable('node_modules/.bin/vitest')
+    await repo.git('branch', 'base')
+
+    // State B: break a test on feat.
+    await repo.git('checkout', '-q', '-b', 'feat')
+    await repo.write({
+      'tests/spec.json': JSON.stringify(
+        {
+          tests: [
+            PASSING_SPECS[0]!,
+            { fullName: 'tasks > rejects blank', title: 'rejects blank', status: 'failed', failureMessage: 'broken at B' },
+          ],
+        },
+        null,
+        2,
+      ),
+    })
+    await repo.commit('B: break a test (vitest plan)')
+    const bSha = (await repo.git('rev-parse', 'HEAD')).trim()
+    const baseSha = (await repo.git('rev-parse', 'base')).trim()
+
+    // Move the label: C declares an entirely different test plan.
+    await repo.write({
+      'package.json': JSON.stringify(
+        { name: 'fake-vitest-app', version: '1.0.0', type: 'module', scripts: { test: 'jest --silent' } },
+        null,
+        2,
+      ),
+    })
+    await repo.commit('C: switch the declared runner to jest')
+    const cSha = (await repo.git('rev-parse', 'HEAD')).trim()
+
+    const git = await GitAdapter.open(repo.dir)
+    const before = { label: 'base', kind: 'ref' as const, sha: baseSha }
+
+    // The discriminator: recorded identity B -> vitest plan, even though the
+    // label 'feat' now points at C.
+    const planForB = await deriveReproductionTestPlan(git, before, { label: 'feat', kind: 'ref' as const, sha: bSha })
+    expect(planForB?.runner).toBe('vitest')
+    expect(planForB?.buildExecutedCommand()).toContain('vitest')
+
+    // Negative control proving the discriminator can tell the states apart:
+    // identity C -> jest plan. (Label-based derivation would return this for
+    // 'feat', silently redefining the experiment.)
+    const planForC = await deriveReproductionTestPlan(git, before, { label: 'feat', kind: 'ref' as const, sha: cSha })
+    expect(planForC?.runner).toBe('jest')
+
+    // And reproduction under B's identity still executes B's vitest command.
+    const context: ExperimentContext = {
+      git,
+      before,
+      after: { label: 'feat', kind: 'ref' as const, sha: bSha },
+      testPlan: planForB,
+      config: { attempts: 2, timeoutMs: 15_000 },
+    }
+    const finding = {
+      id: 'TEST-001',
+      findingClass: 'test-regression' as const,
+      severity: 'critical' as const,
+      message: 'Test "tasks > rejects blank" passed at baseline and fails after the change.',
+      paths: ['tests/spec.json'],
+      evidence: { kind: 'test' as const, claim: 'c', observation: 'o', changedLines: [], reproduction: 'npm test' },
+    }
+    const experiments = buildExperiments([finding], context)
+    expect(experiments[0]?.command.args.join(' ')).toContain('vitest')
+    const assessments = await runExperiments(experiments, context)
+    expect(assessments[0]).toMatchObject({ stateMatched: true, reproduced: 2, stability: 'stable' })
+    await repo.destroy()
+  })
+
+  it('working-tree plan derivation refuses the drifted checkout and falls back to the recorded base', async () => {
+    // Recorded dirty state includes a package.json overlay declaring vitest;
+    // the checkout then drifts to declare jest. The drifted checkout must not
+    // redefine the plan: derivation falls back to the recorded base SHA's
+    // package.json (which declares no vitest shim here — the base fixture's
+    // generic script), and attempts would abort as inconclusive regardless.
+    const repo = await TempRepo.create({
+      'package.json': JSON.stringify(
+        { name: 'wt-plan', version: '1.0.0', type: 'module', scripts: { test: 'node tools/suite.js' } },
+        null,
+        2,
+      ),
+      'tools/suite.js': "console.log('ok')\n",
+      'README.md': '# wt-plan\n',
+    })
+    await repo.git('branch', 'base')
+    const git = await GitAdapter.open(repo.dir)
+    const baseSha = (await repo.git('rev-parse', 'HEAD')).trim()
+
+    // Recorded dirty state: overlay package.json declaring vitest.
+    await repo.write({
+      'package.json': JSON.stringify(
+        { name: 'wt-plan', version: '1.0.0', type: 'module', scripts: { test: 'vitest run' } },
+        null,
+        2,
+      ),
+    })
+    const recorded = await git.diffWorkingTree(baseSha)
+    const fingerprint = recorded.workingTree?.fingerprint
+    expect(fingerprint).toBeDefined()
+
+    // Drift: the checkout's package.json now declares jest.
+    await repo.write({
+      'package.json': JSON.stringify(
+        { name: 'wt-plan', version: '1.0.0', type: 'module', scripts: { test: 'jest --silent' } },
+        null,
+        2,
+      ),
+    })
+
+    const plan = await deriveReproductionTestPlan(
+      git,
+      { label: 'base', kind: 'ref' as const, sha: baseSha },
+      { label: 'working-tree', kind: 'working-tree' as const, sha: null, baseSha, fingerprint },
+    )
+    // The drifted jest declaration never wins: the base SHA's generic plan
+    // is the immutable fallback, and attempts abort inconclusive on drift.
+    expect(plan?.runner).toBe('generic')
+    await repo.destroy()
+  })
+
+  it('the schema itself enforces per-attempt attribution (required, not engine-convention)', () => {
+    const base = { index: 1, outcome: 'reproduced' as const, exitCode: 1, durationMs: 5, timedOut: false }
+    const stateIdentity = { label: 'x', kind: 'ref' as const, sha: 'a'.repeat(40) }
+
+    expect(ReproductionAttemptSchema.safeParse({ ...base, experimentId: 'REPRO-001', stateIdentity }).success).toBe(true)
+    expect(ReproductionAttemptSchema.safeParse({ ...base }).success).toBe(false)
+    expect(ReproductionAttemptSchema.safeParse({ ...base, experimentId: 'REPRO-001' }).success).toBe(false)
+    expect(ReproductionAttemptSchema.safeParse({ ...base, stateIdentity }).success).toBe(false)
   })
 })

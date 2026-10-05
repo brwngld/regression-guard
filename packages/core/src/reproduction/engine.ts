@@ -2,7 +2,12 @@ import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { runCommand, type RunOutcome } from '../exec/run'
-import { selectDependencyInstall, TEST_RESULT_FILE } from '../baseline/discover'
+import {
+  discoverTestCommand,
+  packageJsonHasDependencies,
+  selectDependencyInstall,
+  TEST_RESULT_FILE,
+} from '../baseline/discover'
 import { parseRunnerJson } from '../baseline/parse'
 import type { TestCaseOutcome } from '../schema/baseline'
 import type { ChangeRecord } from '../schema/changeset'
@@ -45,7 +50,7 @@ export interface ExperimentContext {
   before: StateIdentity
   /** Identity of the verified AFTER state (ref or working-tree with baseSha+fingerprint). */
   after: StateIdentity
-  /** Test command knowledge from M2 discovery (null when the repo had no test command). */
+  /** Test command knowledge derived from the RECORDED after state (null when it declares no test command). */
   testPlan: {
     runner: 'vitest' | 'jest' | 'generic'
     userCommand: string
@@ -54,6 +59,63 @@ export interface ExperimentContext {
     testCommandInstalled: boolean
   } | null
   config: { attempts: number; timeoutMs: number }
+}
+
+/**
+ * M4.2: derive the reproduction test plan from the RECORDED immutable after
+ * state — never from a movable label. A branch that moves after verification
+ * (even to a commit whose package.json declares an entirely different runner)
+ * cannot redefine what the experiment means.
+ *
+ * - refs mode: read package.json at the recorded after SHA.
+ * - working-tree mode: re-derive the dirty state against the recorded before
+ *   SHA and verify the fingerprint. On a match, package.json comes from the
+ *   overlay when the change touched it (the fingerprint proves the current
+ *   checkout IS the recorded state) or from the recorded base SHA otherwise.
+ *   On drift, fall back to the base SHA's package.json: whatever plan is
+ *   derived, every attempt re-verifies the fingerprint per attempt and aborts
+ *   as inconclusive — the drifted checkout can never redefine the experiment.
+ */
+export async function deriveReproductionTestPlan(
+  git: GitAdapter,
+  before: StateIdentity,
+  after: StateIdentity,
+): Promise<ExperimentContext['testPlan']> {
+  let pkgText: string | null = null
+
+  if (after.kind === 'ref') {
+    pkgText = after.sha === null ? null : await git.readFileAt(after.sha, 'package.json')
+  } else {
+    // Only immutable identities: the recorded before SHA anchors the dirty
+    // state; the recorded base SHA backs the package.json. A null SHA (never
+    // produced by the pipeline) yields no plan rather than a label fallback.
+    const beforeSha = before.sha
+    const baseSha = after.baseSha ?? before.sha
+    if (beforeSha === null || baseSha === null) {
+      return null
+    }
+    const now = await git.diffWorkingTree(beforeSha)
+    const matched = now.workingTree?.fingerprint !== undefined && now.workingTree.fingerprint === after.fingerprint
+    const overlayTouchedPackageJson = matched
+      ? now.records.some(
+          (record) => record.path === 'package.json' && (record.status === 'modified' || record.status === 'created'),
+        )
+      : false
+    pkgText = matched && overlayTouchedPackageJson
+      ? await readFile(join(git.repoRoot, 'package.json'), 'utf8').catch(() => null)
+      : await git.readFileAt(baseSha, 'package.json')
+  }
+
+  const plan = discoverTestCommand(pkgText)
+  if (plan === null) {
+    return null
+  }
+  return {
+    runner: plan.runner,
+    userCommand: plan.userCommand,
+    buildExecutedCommand: plan.buildExecutedCommand,
+    testCommandInstalled: packageJsonHasDependencies(pkgText),
+  }
 }
 
 /** Runtime-only enrichment: the persisted schema carries `stateMatched`, not prose. */
@@ -533,7 +595,8 @@ export function aggregateAssessment(
     granularity: experiment.granularity,
     attempts: attempts.map((attempt) => ({
       ...attempt,
-      stateIdentity: attempt.stateIdentity === undefined ? undefined : { ...attempt.stateIdentity },
+      // Attribution is required since M4.2; every recorded attempt carries it.
+      stateIdentity: { ...attempt.stateIdentity },
     })),
     stateIdentity: { ...experiment.stateIdentity },
     stateMatched,
