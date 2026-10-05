@@ -153,8 +153,8 @@ export { GitAdapter } from './vcs/git'
 export { parseNameStatus, parseUnifiedDiff } from './vcs/parse'
 export type { RawStatusEntry, UnifiedSection } from './vcs/parse'
 
-export { runCommand } from './exec/run'
-export type { RunOutcome } from './exec/run'
+export { runCommand, startProcess } from './exec/run'
+export type { RunOutcome, RunningProcess } from './exec/run'
 
 export {
   TestStatusSchema,
@@ -211,3 +211,39 @@ export type { VerifyInput, VerifyOutput } from './pipeline'
 
 export { nullAdvisor } from './advisor'
 export type { ContractAdvisor } from './advisor'
+
+export {
+  ServiceReadinessSchema,
+  ServiceDeclarationSchema,
+  ProbeExpectationSchema,
+  ProbeDeclarationSchema,
+  ServiceManifestSchema,
+  ProbeOutcomeSchema,
+  ProbeRunResultSchema,
+  SERVICE_MANIFEST_FILE,
+} from './schema/service'
+export type {
+  ServiceReadiness,
+  ServiceDeclaration,
+  ProbeExpectation,
+  ProbeDeclaration,
+  ServiceManifest,
+  ProbeOutcome,
+  ProbeRunResult,
+} from './schema/service'
+
+export { evaluateProbe } from './service/probe-eval'
+export type { ProbeResponse, ProbeEvaluation } from './service/probe-eval'
+export { parseServiceManifest, manifestDigest } from './service/manifest'
+export { runServiceProbes } from './service/runtime'
+export type { ProbeExecutionOptions, ServicePhaseResult } from './service/runtime'
+
+export { compareManifests, probeTransitions, buildProbeFindings, probeBaselineStatus } from './baseline/probes'
+export type {
+  ManifestSide,
+  ManifestComparison,
+  ProbeFindingInput,
+  ProbeStatusRun,
+  ProbeStatusInput,
+  ProbeStatusContribution,
+} from './baseline/probes'

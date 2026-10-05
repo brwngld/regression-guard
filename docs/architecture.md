@@ -217,7 +217,7 @@ Baseline Engine against the repository's existing tests; it reports
 | M2        | **Baseline Engine**: deterministic existing-test regression detection, `--working-tree` mode | **shipped** |
 | M3        | Impact Analyzer: evidence-backed blast radius, affected tests, impact coverage, prediction-vs-reality | **shipped** |
 | M4        | Reproduction engine, evidence packages, repair contract proposals | **shipped** |
-| M5        | LLM advisors, browser/API/contract/security/adversarial verification, non-JS languages, CI actions | planned |
+| M5        | **Service Verification**: declared HTTP services + deterministic probes (execution evidence; browser-DOM execution and LLM advisors deliberately deferred) | **shipped** |
 
 ### Baseline Engine (M2)
 
@@ -309,6 +309,24 @@ package carries dual-baseline state identities — A (original baseline) and B
 scope) and A → C (final health) as full verifications. Lineage is explicit: a
 deterministic verification context id plus a unique run id. There is no
 automatic repair, no impact-derived permissions, and no orchestration.
+
+### Service Verification (M5)
+
+Repositories DECLARE runnable services and deterministic HTTP probes in a
+checked-in manifest (`regression-guard.services.yaml`, trusted like
+`scripts.test`). The Baseline Extension runs each side's probes inside the
+SAME isolated before/after worktrees the test phase materialized — reading the
+manifest from each worktree on disk, so the immutable-identity rule holds
+exactly as test-plan discovery does. Outcomes are classified with the SHARED
+transition table (PASS → FAIL is a `service-regression` finding that rejects
+by default; FAIL → FAIL is pre-existing; unknown forces partial); when the two
+sides' manifest digests differ, each side still runs its own declaration and
+the comparison is marked non-comparable (forced partial, info finding).
+Reproduction reruns the ONE failing probe N-of-M against the recorded after
+state, deriving the manifest immutably per side (recorded SHA, or verified
+fingerprint / base SHA in working-tree mode) with the same per-attempt
+materialization discipline as test experiments. Deliberately out of scope: no
+LLM, no browser-DOM execution engine, no generated tests.
 
 ## Repository layout
 

@@ -109,6 +109,18 @@ export function renderMarkdownReport(report: VerificationReport): string {
     push(`- **After:** \`${b.after.ref}\` (${afterIdentity}) — exit ${b.after.exitCode ?? 'n/a'}, ${Math.round(b.after.durationMs / 100) / 10}s, ${b.after.tests.length} test(s)`)
     const s = b.summary
     push(`- **Transitions:** ${s.preserved} preserved, **${s.regressed} regressed**, ${s.preExisting} pre-existing, ${s.improved} improved, ${s.unknown} inconclusive.`)
+    if (b.probes !== undefined) {
+      const p = b.probes
+      // Partition over the compared (before-matched) probes by their after
+      // outcome: preserved+improved passed, regressed+pre-existing failed.
+      const passed = p.summary.preserved + p.summary.improved
+      const failed = p.summary.regressed + p.summary.preExisting
+      const inconclusive = p.summary.unknown
+      const compared = passed + failed + inconclusive
+      push(
+        `- **Service probes:** ${compared} compared — ${passed} passed, ${failed} failed, ${inconclusive} inconclusive (manifest ${p.manifestMode}; services ready before/after: ${p.before.servicesReady.length}|${p.after.servicesReady.length})`,
+      )
+    }
     push(`- **Executed:** \`${b.executedCommand}\` in isolated worktrees; the working checkout was not touched.`, '')
   }
 

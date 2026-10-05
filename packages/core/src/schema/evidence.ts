@@ -61,11 +61,13 @@ export function severityForClass(findingClass: FindingClass | string): 'info' | 
     case 'prohibited-change':
     case 'preserved-area-changed':
     case 'test-regression':
+    case 'service-regression':
       return 'critical'
     case 'changed-dependency':
     case 'pre-existing-failure':
     case 'baseline-incomplete':
     case 'test-command-changed':
+    case 'service-manifest-changed':
       return 'info'
     default:
       return 'warn'

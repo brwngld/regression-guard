@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ProbeRunResultSchema } from './service'
 
 /**
  * Baseline Engine data model (M2). The engine executes the repository's
@@ -65,6 +66,16 @@ export const BaselineComparisonSchema = z.object({
   before: TestRunResultSchema,
   after: TestRunResultSchema,
   summary: BaselineSummarySchema,
+  /** M5 service-probe phase, present when a service manifest existed at either state. */
+  probes: z
+    .object({
+      before: ProbeRunResultSchema,
+      after: ProbeRunResultSchema,
+      summary: BaselineSummarySchema,
+      /** 'comparable' | 'non-comparable' (from compareManifests; 'none' never reaches here). */
+      manifestMode: z.enum(['comparable', 'non-comparable']),
+    })
+    .optional(),
 })
 export type BaselineComparison = z.infer<typeof BaselineComparisonSchema>
 

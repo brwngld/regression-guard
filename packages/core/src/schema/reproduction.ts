@@ -22,14 +22,14 @@ export const StateIdentitySchema = z.object({
 })
 export type StateIdentity = z.infer<typeof StateIdentitySchema>
 
-export const ExperimentKindSchema = z.enum(['git-diff', 'test'])
+export const ExperimentKindSchema = z.enum(['git-diff', 'test', 'http-probe'])
 export type ExperimentKind = z.infer<typeof ExperimentKindSchema>
 
 /**
  * The run granularity an experiment actually achieved. Never claim case-level
  * reproduction when the runner only supports coarser reruns.
  */
-export const ExperimentGranularitySchema = z.enum(['case', 'file', 'suite', 'n/a'])
+export const ExperimentGranularitySchema = z.enum(['case', 'file', 'suite', 'probe', 'n/a'])
 export type ExperimentGranularity = z.infer<typeof ExperimentGranularitySchema>
 
 /**

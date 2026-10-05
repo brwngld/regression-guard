@@ -26,6 +26,11 @@ export const DEFAULT_POLICY: Record<FindingClass, PolicyAction> = {
   // Visible but never independently worsens the verdict; paired with a forced
   // `partial` regressions status when the test command changes across refs.
   'test-command-changed': 'accept',
+  // Deterministic PASS -> FAIL probe transitions reject by default, exactly
+  // like test regressions; a changed manifest is visible but never worsens
+  // the gate on its own (it forces partial probe comparability instead).
+  'service-regression': 'reject',
+  'service-manifest-changed': 'accept',
 }
 
 const ACTION_RANK: Record<PolicyAction, number> = {

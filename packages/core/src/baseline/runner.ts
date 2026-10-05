@@ -2,14 +2,19 @@ import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { runCommand, type RunOutcome } from '../exec/run'
+import type { ChangeRecord } from '../schema/changeset'
 import type { Finding } from '../schema/evidence'
 import type { RegressionStatus } from '../schema/report'
 import type {
   BaselineComparison,
+  BaselineSummary,
   TestCaseOutcome,
   TestRunResult,
+  TestTransition,
 } from '../schema/baseline'
-import type { ChangeRecord } from '../schema/changeset'
+import { SERVICE_MANIFEST_FILE, type ProbeRunResult, type ServiceManifest } from '../schema/service'
+import { manifestDigest, parseServiceManifest } from '../service/manifest'
+import { runServiceProbes } from '../service/runtime'
 import type { GitAdapter } from '../vcs/git'
 import {
   discoverTestCommand,
@@ -19,6 +24,13 @@ import {
 } from './discover'
 import { parseRunnerJson } from './parse'
 import { classifyPerTest, classifySuite, summarize, suiteStatusOf, type SuiteStatus } from './compare'
+import {
+  buildProbeFindings,
+  compareManifests,
+  probeBaselineStatus,
+  probeTransitions,
+  type ProbeStatusContribution,
+} from './probes'
 
 type ResolvedPlan = Exclude<TestCommandPlan, null>
 
@@ -102,10 +114,6 @@ export async function runBaselineVerification(options: BaselineOptions): Promise
     const beforePlan = discoverTestCommand(beforePkgText)
     const afterPlan = discoverTestCommand(afterPkgText)
 
-    if (beforePlan === null && afterPlan === null) {
-      return { regressions: { status: 'not-verified' }, findings: [] }
-    }
-
     const comparable =
       beforePlan !== null && afterPlan !== null && plansEquivalent(beforePlan, afterPlan)
 
@@ -130,12 +138,133 @@ export async function runBaselineVerification(options: BaselineOptions): Promise
           })
         : syntheticRunResult('after', afterLabel, afterSha)
 
-    return conclude({ beforePlan, afterPlan, comparable, before: beforeResult, after: afterResult })
+    // M5 service phase — AFTER the test executions, BEFORE cleanup: the probe
+    // runs reuse the SAME materialized worktrees (they ARE the recorded
+    // states), so the manifest is read from each worktree on disk exactly like
+    // the test-plan discovery above. 'none' (no usable manifest on either
+    // side) leaves the phase absent and the outcome byte-identical to pre-M5.
+    const probes = await runServicePhase({
+      beforeDir,
+      afterDir,
+      beforeRef: options.before.ref,
+      afterRef: afterLabel,
+    })
+
+    if (beforePlan === null && afterPlan === null && probes === undefined) {
+      return { regressions: { status: 'not-verified' }, findings: [] }
+    }
+
+    return conclude({
+      beforePlan,
+      afterPlan,
+      comparable,
+      before: beforeResult,
+      after: afterResult,
+      probes,
+    })
   } finally {
     await git.removeWorktree(beforeDir).catch(() => {})
     await git.removeWorktree(afterDir).catch(() => {})
     // Retries: Windows may briefly lock files held by just-killed trees.
     await rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {})
+  }
+}
+
+/** One side's service-manifest state, read from its materialized worktree. */
+interface ManifestSideOnDisk {
+  digest: string | null
+  manifest: ServiceManifest | null
+}
+
+/**
+ * Digest sentinel recorded for a side whose recorded state declares no usable
+ * manifest: the schema's `manifestDigest` is a string, while comparability was
+ * already decided from the null digest via compareManifests.
+ */
+const ABSENT_MANIFEST_DIGEST = 'absent'
+
+async function readManifestSide(worktreeDir: string): Promise<ManifestSideOnDisk> {
+  const text = await readFile(join(worktreeDir, SERVICE_MANIFEST_FILE), 'utf8').catch(() => null)
+  const manifest = parseServiceManifest(text)
+  return manifest === null
+    ? { digest: null, manifest: null }
+    : { digest: manifestDigest(manifest), manifest }
+}
+
+interface ServicePhaseInput {
+  beforeDir: string
+  afterDir: string
+  beforeRef: string
+  afterRef: string
+}
+
+/** Everything `conclude` needs to fold the probe phase into the baseline outcome. */
+interface ServicePhaseResult {
+  before: ProbeRunResult
+  after: ProbeRunResult
+  manifestMode: 'comparable' | 'non-comparable'
+  transitions: TestTransition[]
+  summary: BaselineSummary
+  findings: Finding[]
+  status: ProbeStatusContribution
+}
+
+/**
+ * M5 service phase: run each side's declared probes inside its ALREADY
+ * materialized worktree (the recorded state), then classify with the shared
+ * transition table. Returns undefined when neither side declares a usable
+ * manifest (mode 'none') — behavior identical to pre-M5. Even when the
+ * manifests are non-comparable each side runs its OWN declaration: it is the
+ * transition interpretation that gets limited, never execution.
+ */
+async function runServicePhase(input: ServicePhaseInput): Promise<ServicePhaseResult | undefined> {
+  const beforeSide = await readManifestSide(input.beforeDir)
+  const afterSide = await readManifestSide(input.afterDir)
+  const comparison = compareManifests(beforeSide, afterSide)
+  if (comparison.mode === 'none') {
+    return undefined
+  }
+
+  const beforeRun = await runOneProbeSide('before', input.beforeRef, input.beforeDir, beforeSide)
+  const afterRun = await runOneProbeSide('after', input.afterRef, input.afterDir, afterSide)
+
+  const transitions = probeTransitions(beforeRun.probes, afterRun.probes)
+  const summary = summarize(transitions)
+  const findings = buildProbeFindings({ beforeRun, afterRun, transitions, summary })
+  const status = probeBaselineStatus({
+    transitions,
+    summary,
+    manifestMode: comparison.mode,
+    runs: [beforeRun, afterRun],
+  })
+  return { before: beforeRun, after: afterRun, manifestMode: comparison.mode, transitions, summary, findings, status }
+}
+
+/** Execute one side's probes (or record an honest empty run when it declares no manifest). */
+async function runOneProbeSide(
+  label: 'before' | 'after',
+  ref: string,
+  worktreeDir: string,
+  side: ManifestSideOnDisk,
+): Promise<ProbeRunResult> {
+  if (side.manifest === null) {
+    return {
+      label,
+      ref,
+      manifestDigest: ABSENT_MANIFEST_DIGEST,
+      servicesReady: [],
+      probes: [],
+      durationMs: 0,
+    }
+  }
+  const phase = await runServiceProbes({ cwd: worktreeDir, manifest: side.manifest })
+  return {
+    label,
+    ref,
+    manifestDigest: side.digest ?? ABSENT_MANIFEST_DIGEST,
+    servicesReady: phase.servicesReady,
+    probes: phase.probes,
+    durationMs: phase.durationMs,
   }
 }
 
@@ -284,6 +413,8 @@ interface ConcludeInput {
   comparable: boolean
   before: TestRunResult
   after: TestRunResult
+  /** M5 service-probe phase; absent when neither state declared a manifest. */
+  probes?: ServicePhaseResult
 }
 
 const conclude = (input: ConcludeInput): BaselineOutcome => {
@@ -291,25 +422,34 @@ const conclude = (input: ConcludeInput): BaselineOutcome => {
   const findings: Finding[] = []
   const nextFindingId = createFindingIdFactory()
   const perTest = before.mode === 'per-test' && after.mode === 'per-test'
+  // The test phase ran at all when either side declared a test command; a
+  // manifest-only repository reaches conclude purely on its probe phase.
+  const testPhaseRan = input.beforePlan !== null || input.afterPlan !== null
 
-  const transitions = perTest
-    ? classifyPerTest(before.tests, after.tests)
-    : [
-        {
-          id: '(suite)',
-          title: 'test suite',
-          before: suiteStatusOf(before),
-          after: suiteStatusOf(after),
-          kind: classifySuite(suiteStatusOf(before), suiteStatusOf(after)),
-        },
-      ]
+  const transitions = !testPhaseRan
+    ? []
+    : perTest
+      ? classifyPerTest(before.tests, after.tests)
+      : [
+          {
+            id: '(suite)',
+            title: 'test suite',
+            before: suiteStatusOf(before),
+            after: suiteStatusOf(after),
+            kind: classifySuite(suiteStatusOf(before), suiteStatusOf(after)),
+          },
+        ]
   const summary = summarize(transitions)
 
-  const baselineTests = perTest
-    ? before.tests.filter((test) => test.status === 'passed' || test.status === 'failed').length
-    : 1
+  const baselineTests = !testPhaseRan
+    ? 0
+    : perTest
+      ? before.tests.filter((test) => test.status === 'passed' || test.status === 'failed').length
+      : 1
 
-  const userCommand = input.afterPlan?.userCommand ?? input.beforePlan?.userCommand ?? 'npm test'
+  const userCommand = !testPhaseRan
+    ? '(none)'
+    : (input.afterPlan?.userCommand ?? input.beforePlan?.userCommand ?? 'npm test')
 
   // In working-tree mode the after state is HEAD plus a dirty overlay: the
   // fingerprint (not any commit SHA) identifies what was actually tested.
@@ -367,7 +507,7 @@ const conclude = (input: ConcludeInput): BaselineOutcome => {
     })
   }
 
-  if (!input.comparable) {
+  if (testPhaseRan && !input.comparable) {
     findings.push({
       id: nextFindingId(),
       findingClass: 'test-command-changed',
@@ -384,15 +524,22 @@ const conclude = (input: ConcludeInput): BaselineOutcome => {
     })
   }
 
+  // M5: the service-probe findings append to the test findings and flow
+  // through the same gate (service-regression rejects by default).
+  findings.push(...(input.probes?.findings ?? []))
+
   // Status derivation — conservative at every branch.
-  let status: RegressionStatus['status']
   const incompleteReasons: string[] = []
 
   const beforeSuite: SuiteStatus = suiteStatusOf(before)
   const afterSuite: SuiteStatus = suiteStatusOf(after)
 
-  if (beforeSuite === 'unknown' || afterSuite === 'unknown') {
-    status = 'partial'
+  /** The test phase's own status; 'not-verified' when it never ran at all. */
+  let testStatus: RegressionStatus['status']
+  if (!testPhaseRan) {
+    testStatus = 'not-verified'
+  } else if (beforeSuite === 'unknown' || afterSuite === 'unknown') {
+    testStatus = 'partial'
     for (const run of [before, after]) {
       if (run.timedOut) {
         incompleteReasons.push(`${run.label} run timed out after ${Math.round(run.durationMs / 1000)}s`)
@@ -403,24 +550,42 @@ const conclude = (input: ConcludeInput): BaselineOutcome => {
     }
   } else if (!perTest && beforeSuite === 'fail') {
     // Suite-level baseline was not green: after-failures cannot be attributed.
-    status = 'partial'
+    testStatus = 'partial'
     incompleteReasons.push('the baseline suite itself fails, so post-change failures cannot be attributed to the change')
   } else if (summary.regressed > 0) {
-    status = 'fail'
+    testStatus = 'fail'
   } else if (summary.unknown > 0) {
-    status = 'partial'
+    testStatus = 'partial'
     incompleteReasons.push(`${summary.unknown} baseline test(s) have inconclusive outcomes after the change`)
   } else {
-    status = 'pass'
+    testStatus = 'pass'
   }
 
   // A changed test command means the after state redefined how its own tests
   // run; the comparison is never apples-to-apples, so a pass cannot be claimed.
-  if (!input.comparable) {
-    status = 'partial'
+  if (testPhaseRan && !input.comparable) {
+    testStatus = 'partial'
     incompleteReasons.push(
       `the test command changed between the compared states (before: "${before.command}" -> after: "${after.command}"), so the before and after runs are not directly comparable`,
     )
+  }
+
+  // M5 combination: fail if either phase failed; else partial if either phase
+  // is partial; else pass when EITHER phase ran; 'not-verified' survives only
+  // when neither ran (which never reaches conclude — see runBaselineVerification).
+  const probeStatus = input.probes?.status.status
+  let status: RegressionStatus['status']
+  if (testStatus === 'fail' || probeStatus === 'fail') {
+    status = 'fail'
+  } else if (testStatus === 'partial' || probeStatus === 'partial') {
+    status = 'partial'
+  } else if (testPhaseRan || input.probes !== undefined) {
+    status = 'pass'
+  } else {
+    status = 'not-verified'
+  }
+  if (input.probes !== undefined) {
+    incompleteReasons.push(...input.probes.status.incompleteReasons)
   }
 
   if (status === 'partial' && incompleteReasons.length > 0) {
@@ -440,6 +605,14 @@ const conclude = (input: ConcludeInput): BaselineOutcome => {
     })
   }
 
+  // M5 count folding: probes join the baseline population (comparable = the
+  // before side's passed/failed probes) and probe regressions join the total.
+  const comparableProbes = input.probes
+    ? input.probes.before.probes.filter(
+        (probe) => probe.status === 'passed' || probe.status === 'failed',
+      ).length
+    : 0
+
   return {
     baseline: {
       userCommand,
@@ -450,11 +623,21 @@ const conclude = (input: ConcludeInput): BaselineOutcome => {
       before,
       after,
       summary,
+      ...(input.probes !== undefined
+        ? {
+            probes: {
+              before: input.probes.before,
+              after: input.probes.after,
+              summary: input.probes.summary,
+              manifestMode: input.probes.manifestMode,
+            },
+          }
+        : {}),
     },
     regressions: {
       status,
-      baselineTests,
-      regressionsFound: summary.regressed,
+      baselineTests: baselineTests + comparableProbes,
+      regressionsFound: summary.regressed + (input.probes?.summary.regressed ?? 0),
     },
     findings,
   }

@@ -51,6 +51,9 @@ export const FindingClassSchema = z.enum([
   'baseline-incomplete',
   // M2.1 (baseline comparability): the test command itself changed across refs.
   'test-command-changed',
+  // M5 (service verification):
+  'service-regression',
+  'service-manifest-changed',
 ])
 export type FindingClass = z.infer<typeof FindingClassSchema>
 

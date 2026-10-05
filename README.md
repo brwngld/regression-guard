@@ -98,7 +98,7 @@ overridable per finding class in the contract.
 | M2 | **Baseline Engine**: existing-test regression detection (per-test where the runner provides outcomes, suite-level fallback), `--working-tree` mode, hard timeouts with process-tree kill | **shipped** |
 | M3 | **Impact Analyzer**: evidence-backed blast radius, affected tests, impact coverage, prediction-vs-reality (report-only, never gates) | **shipped** |
 | M4 | **Reproduction & Repair Preparation**: exact-state N-of-M reproduction with honest stability accounting, evidence packages, `proposed` repair contracts (editable / restore-to-baseline / prohibited), dual-baseline lineage | **shipped** |
-| M5 | LLM advisors (contract inference, test generation), browser/API/security verification, CI actions | planned |
+| M5 | **Service Verification**: repos declare HTTP services + deterministic probes in `regression-guard.services.yaml`; the Baseline Extension boots them in the same isolated worktrees and diffs outcomes with the shared transition table; probe regressions reproduce N-of-M | **shipped** |
 
 Reproduction enriches findings without ever rewriting them: an `unstable` or
 `not-reproduced` assessment qualifies confidence, but M2's observed regression
@@ -112,6 +112,12 @@ preserved, PASS→FAIL is a regression (REJECT by default), FAIL→FAIL is
 pre-existing and never worsens the verdict alone, FAIL→PASS is an improvement,
 and missing or inconclusive executions report `partial` — never silently a
 pass.
+
+Service verification applies the exact same table to declared HTTP probes:
+commit a `regression-guard.services.yaml` declaring services (boot command +
+readiness) and probes (fixed request + expected status/body), and every
+verification boots them inside the isolated before/after worktrees, diffing
+probe outcomes (and N-of-M reproducing regressions) as execution evidence.
 
 ## Repository layout
 

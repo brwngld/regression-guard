@@ -12,6 +12,9 @@ import { parseRunnerJson } from '../baseline/parse'
 import type { TestCaseOutcome } from '../schema/baseline'
 import type { ChangeRecord } from '../schema/changeset'
 import type { Finding } from '../schema/evidence'
+import { SERVICE_MANIFEST_FILE, type ProbeOutcome } from '../schema/service'
+import { parseServiceManifest } from '../service/manifest'
+import { runServiceProbes } from '../service/runtime'
 import type {
   AttemptOutcome,
   ExperimentGranularity,
@@ -153,6 +156,7 @@ const TEST_PURPOSE: Readonly<Record<Exclude<ExperimentGranularity, 'n/a'>, strin
   case: 'Re-run the single failing test case against the recorded after state.',
   file: 'Re-run the failing test file against the recorded after state.',
   suite: 'Re-run the full test suite against the recorded after state.',
+  probe: 'Re-run the failing HTTP probe against the recorded after state.',
 }
 
 /**
@@ -171,11 +175,14 @@ export function buildExperiments(
     let experiment: ReproductionExperiment | null = null
     if (finding.findingClass === 'test-regression') {
       experiment = buildTestExperiment(finding, context, nextExperimentId(experiments.length))
+    } else if (finding.findingClass === 'service-regression') {
+      experiment = buildProbeExperiment(finding, context, nextExperimentId(experiments.length))
     } else if (GIT_DIFF_CLASSES.has(finding.findingClass)) {
       experiment = buildGitDiffExperiment(finding, context, nextExperimentId(experiments.length))
     }
     // unfulfilled-contract, pre-existing-failure, baseline-incomplete,
-    // test-command-changed (and anything pathless) get no experiment.
+    // test-command-changed, service-manifest-changed (and anything pathless)
+    // get no experiment.
     if (experiment !== null) {
       experiments.push(experiment)
     }
@@ -284,6 +291,53 @@ function testTargetName(finding: Finding): string | undefined {
   )
 }
 
+/**
+ * `service-regression` experiment (M5): re-run the ONE failing probe against
+ * the recorded after state. The structured command names an ENGINE-INTERNAL
+ * execution path — the service startup is a repo-declared shell string from
+ * the manifest, never a fixed binary, so no shell rendering exists: each
+ * attempt materializes the recorded state fresh (M4.1), derives the manifest
+ * from that state, and executes a one-probe run via the service runtime.
+ * Returns null when the finding carries no quotable probe id.
+ */
+function buildProbeExperiment(
+  finding: Finding,
+  context: ExperimentContext,
+  id: string,
+): ReproductionExperiment | null {
+  const probeId = probeTargetName(finding)
+  if (probeId === undefined) {
+    return null
+  }
+  return {
+    id,
+    kind: 'http-probe',
+    purpose: TEST_PURPOSE.probe,
+    command: {
+      executable: 'regression-guard-internal',
+      args: ['service-probe', probeId],
+      cwd: '<isolated-worktree>',
+    },
+    granularity: 'probe',
+    timeoutMs: context.config.timeoutMs,
+    stateIdentity: context.after,
+    sourceFindingIds: [finding.id],
+  }
+}
+
+/**
+ * The regression's probe id, as quoted by the Baseline Engine's probe
+ * findings — the exact mirror of testTargetName's message-first discipline.
+ */
+function probeTargetName(finding: Finding): string | undefined {
+  return (
+    /Probe "(.+)" passed at baseline/.exec(finding.message)?.[1] ??
+    /Probe "([^"]+)"/.exec(finding.message)?.[1] ??
+    /Probe "(.+)" regressed/.exec(finding.evidence.claim)?.[1] ??
+    /Probe "([^"]+)"/.exec(finding.evidence.claim)?.[1]
+  )
+}
+
 /** git-diff experiment: re-derive the path's presence between the two states. */
 function buildGitDiffExperiment(
   finding: Finding,
@@ -327,8 +381,9 @@ function refToken(identity: StateIdentity): string {
  * Execute experiments in isolation, sequentially (deterministic). NEVER
  * touches the user checkout: test experiments materialize a FRESH isolated
  * worktree per ATTEMPT and remove it afterwards (attempt isolation — see
- * runTestExperiment); git-diff experiments re-derive evidence read-only
- * through the git adapter.
+ * runTestExperiment); http-probe experiments follow the same per-attempt
+ * materialization via the service runtime (runProbeExperiment); git-diff
+ * experiments re-derive evidence read-only through the git adapter.
  */
 export async function runExperiments(
   experiments: ReproductionExperiment[],
@@ -339,7 +394,9 @@ export async function runExperiments(
     assessments.push(
       experiment.kind === 'git-diff'
         ? await runGitDiffExperiment(experiment, context)
-        : await runTestExperiment(experiment, context),
+        : experiment.kind === 'http-probe'
+          ? await runProbeExperiment(experiment, context)
+          : await runTestExperiment(experiment, context),
     )
   }
   return assessments
@@ -549,6 +606,245 @@ function unexecutedAttempt(
     timedOut,
     detail,
   }
+}
+
+/**
+ * http-probe experiment (M5): bounded N-of-M, every attempt a FRESH
+ * materialization of the recorded after state (same M4.1 discipline as test
+ * experiments). The execution path is engine-internal, not a shell: the
+ * attempt derives the service manifest from the RECORDED state, filters it to
+ * the one target probe, boots the declared services via the service runtime,
+ * and maps the probe outcome — failed reproduces, passed does not, unknown is
+ * inconclusive with its reason.
+ */
+async function runProbeExperiment(
+  experiment: ReproductionExperiment,
+  context: ExperimentContext,
+): Promise<AssessmentWithDetail> {
+  const requested = context.config.attempts
+  const attempts: ReproductionAttempt[] = []
+  let stateMatched = true
+  for (let index = 1; index <= requested; index += 1) {
+    const isolated = await runIsolatedProbeAttempt(experiment, context, index)
+    attempts.push(isolated.attempt)
+    if (!isolated.stateMatched) {
+      stateMatched = false
+    }
+  }
+  return aggregateAssessment(experiment, attempts, stateMatched, requested)
+}
+
+/** The probe id an http-probe experiment targets (carried in its structured command args). */
+function probeIdOf(experiment: ReproductionExperiment): string | undefined {
+  const args = experiment.command.args
+  const flag = args.indexOf('service-probe')
+  const value = flag !== -1 ? args[flag + 1] : args.at(-1)
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * One probe attempt inside its own fresh materialization: mkdtemp base →
+ * worktree at the recorded immutable SHA (plus the fingerprint-verified
+ * overlay in working-tree mode, re-verified EVERY attempt) → dependency
+ * restoration → manifest-derived one-probe execution → cleanup in finally.
+ */
+async function runIsolatedProbeAttempt(
+  experiment: ReproductionExperiment,
+  context: ExperimentContext,
+  index: number,
+): Promise<{ attempt: ReproductionAttempt; stateMatched: boolean }> {
+  let baseDir: string | null = null
+  let worktreeDir: string | null = null
+  try {
+    baseDir = await mkdtemp(join(tmpdir(), 'rg-repro-probe-'))
+
+    // State verification + materialization, per attempt — identical rules to
+    // test attempts: recorded SHAs only, fingerprint re-verified per attempt.
+    let overlay: ChangeRecord[] | undefined
+    let checkoutRef: string
+    if (context.after.kind === 'ref') {
+      checkoutRef = immutableToken(context.after)
+    } else {
+      const rederived = await context.git.diffWorkingTree(immutableToken(context.before))
+      const current = rederived.workingTree?.fingerprint
+      const recorded = context.after.fingerprint
+      if (recorded === undefined || current !== recorded) {
+        return {
+          attempt: unexecutedAttempt(experiment, index, fingerprintMismatchDetail(recorded, current)),
+          stateMatched: false,
+        }
+      }
+      overlay = rederived.records
+      checkoutRef = context.after.baseSha ?? rederived.workingTree?.baseSha ?? immutableToken(context.after)
+    }
+
+    worktreeDir = join(baseDir, 'worktree')
+    await context.git.createWorktree(worktreeDir, checkoutRef)
+    if (overlay !== undefined) {
+      await overlayWorkingTree(context.git, worktreeDir, overlay)
+    }
+
+    // The service command is repo-declared and may need dependencies exactly
+    // like a test command (a repo can declare services with no test command
+    // at all): same deterministic restoration per materialization.
+    const installFailure = await restoreProbeDependencies(worktreeDir, context)
+    if (installFailure !== null) {
+      return {
+        attempt: unexecutedAttempt(
+          experiment,
+          index,
+          `dependency installation failed (${installFailure.strategy}, exit ${installFailure.exitCode ?? 'killed'}): the declared service never started`,
+          installFailure.timedOut,
+        ),
+        stateMatched: true,
+      }
+    }
+
+    return {
+      attempt: await executeProbeAttempt(experiment, context, worktreeDir, overlay, index),
+      stateMatched: true,
+    }
+  } catch (error) {
+    return {
+      attempt: unexecutedAttempt(experiment, index, `state could not be materialized: ${errorMessage(error)}`),
+      stateMatched: false,
+    }
+  } finally {
+    if (worktreeDir !== null) {
+      await context.git.removeWorktree(worktreeDir).catch(() => {})
+    }
+    if (baseDir !== null) {
+      // Retries: Windows may briefly lock files held by just-killed trees.
+      await rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {})
+    }
+  }
+}
+
+/**
+ * The service-manifest text of the RECORDED after state — the same immutable
+ * derivation discipline as deriveReproductionTestPlan: refs read the file at
+ * the recorded SHA; working-tree mode reads the fingerprint-verified overlay
+ * when the change touched the manifest (the fingerprint proves the checkout
+ * IS the recorded state), the recorded base SHA otherwise. Labels never cross
+ * the boundary.
+ */
+async function manifestTextForState(
+  context: ExperimentContext,
+  overlay: ChangeRecord[] | undefined,
+): Promise<string | null> {
+  if (context.after.kind === 'ref') {
+    return context.after.sha === null
+      ? null
+      : await context.git.readFileAt(context.after.sha, SERVICE_MANIFEST_FILE)
+  }
+  const overlayTouchedManifest = (overlay ?? []).some(
+    (record) =>
+      record.path === SERVICE_MANIFEST_FILE && (record.status === 'modified' || record.status === 'created'),
+  )
+  if (overlayTouchedManifest) {
+    return readFile(join(context.git.repoRoot, SERVICE_MANIFEST_FILE), 'utf8').catch(() => null)
+  }
+  const baseSha = context.after.baseSha ?? (context.before.kind === 'ref' ? context.before.sha : null)
+  return baseSha === null ? null : await context.git.readFileAt(baseSha, SERVICE_MANIFEST_FILE)
+}
+
+/** Execute the one target probe against a materialized worktree; map its outcome onto attempt semantics. */
+async function executeProbeAttempt(
+  experiment: ReproductionExperiment,
+  context: ExperimentContext,
+  worktreeDir: string,
+  overlay: ChangeRecord[] | undefined,
+  index: number,
+): Promise<ReproductionAttempt> {
+  const probeId = probeIdOf(experiment)
+  if (probeId === undefined) {
+    return unexecutedAttempt(experiment, index, 'the experiment carries no target probe id')
+  }
+
+  const manifest = parseServiceManifest(await manifestTextForState(context, overlay))
+  if (manifest === null) {
+    return unexecutedAttempt(
+      experiment,
+      index,
+      `no usable service manifest (${SERVICE_MANIFEST_FILE}) at the recorded after state`,
+    )
+  }
+
+  const target = manifest.probes.find((probe) => probe.id === probeId)
+  if (target === undefined) {
+    return unexecutedAttempt(
+      experiment,
+      index,
+      `probe "${probeId}" is not declared in the manifest of the recorded after state`,
+    )
+  }
+
+  // One-probe manifest, same declared services: only the target executes, so
+  // the attempt's outcome is exactly that probe's outcome.
+  const phase = await runServiceProbes({
+    cwd: worktreeDir,
+    manifest: { ...manifest, probes: [target] },
+  })
+  const outcome = phase.probes.find((probe) => probe.probeId === probeId)
+  if (outcome === undefined) {
+    return unexecutedAttempt(
+      experiment,
+      index,
+      `probe "${probeId}" produced no outcome against the recorded after state`,
+    )
+  }
+  const decision = probeAttemptOutcome(outcome)
+  return {
+    index,
+    experimentId: experiment.id,
+    stateIdentity: { ...experiment.stateIdentity },
+    outcome: decision.outcome,
+    // 0/1 mirror the probe's own conclusive result; unknown carries no code.
+    exitCode: outcome.status === 'unknown' ? null : outcome.status === 'failed' ? 1 : 0,
+    durationMs: phase.durationMs,
+    timedOut: false,
+    detail: decision.detail,
+  }
+}
+
+/** Map a probe outcome onto reproduction semantics: failed reproduces, passed does not, unknown stays honest. */
+function probeAttemptOutcome(outcome: ProbeOutcome): { outcome: AttemptOutcome; detail: string } {
+  if (outcome.status === 'failed') {
+    const detail = outcome.detail?.split('\n')[0]
+    return {
+      outcome: 'reproduced',
+      detail: `probe failed (HTTP ${outcome.httpStatus ?? 'n/a'})${detail ? ` — ${detail}` : ''}`,
+    }
+  }
+  if (outcome.status === 'passed') {
+    return { outcome: 'not-reproduced', detail: `probe passed (HTTP ${outcome.httpStatus ?? 'n/a'})` }
+  }
+  return { outcome: 'inconclusive', detail: outcome.detail ?? 'probe outcome was inconclusive' }
+}
+
+/**
+ * Restore dependencies for a probe attempt from the MATERIALIZED worktree's
+ * own package.json — deliberately not gated on the test plan: a repository
+ * may declare services without declaring any test command, and the declared
+ * service command deserves the same deterministic restoration discipline.
+ */
+async function restoreProbeDependencies(
+  worktreeDir: string,
+  context: ExperimentContext,
+): Promise<{ strategy: string; exitCode: number | null; timedOut: boolean } | null> {
+  const pkgText = await readFile(join(worktreeDir, 'package.json'), 'utf8').catch(() => null)
+  const lockfileExists = await readFile(join(worktreeDir, 'package-lock.json'), 'utf8')
+    .then(() => true)
+    .catch(() => false)
+  const install = selectDependencyInstall(pkgText, lockfileExists)
+  if (install.command === null) {
+    return null
+  }
+  const outcome = await runCommand(install.command, { cwd: worktreeDir, timeoutMs: context.config.timeoutMs })
+  if (outcome.exitCode === 0) {
+    return null
+  }
+  return { strategy: install.strategy, exitCode: outcome.exitCode, timedOut: outcome.timedOut }
 }
 
 /**

@@ -35,6 +35,8 @@ const EXPECTED_OBJECTIVES: Record<FindingClass, string> = {
   'pre-existing-failure': 'Optionally fix the pre-existing failure.',
   'baseline-incomplete': 'Complete baseline verification.',
   'test-command-changed': 'Reconcile the test command change or re-authorize the baseline.',
+  'service-regression': 'Repair the service regression so the probe passes again.',
+  'service-manifest-changed': 'Reconcile the service manifest change or re-authorize the probe baseline.',
 }
 
 function contractOf(paths: Record<string, unknown> = {}): ChangeContract {

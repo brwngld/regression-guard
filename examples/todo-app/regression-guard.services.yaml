@@ -1,0 +1,17 @@
+# M5 service manifest: declare the Vite dev server and one deterministic
+# HTTP probe. Regression Guard boots the service inside each isolated
+# before/after worktree and executes the probe against it.
+#
+# --host 127.0.0.1 is deliberate: the engine's readiness checks and probes
+# always target the IPv4 loopback, and Vite's default 'localhost' binding is
+# IPv6-only on some machines.
+version: 1
+services:
+  - name: web
+    command: npm run dev -- --port 5173 --strictPort --host 127.0.0.1
+    readiness: { port: 5173, path: /, timeoutMs: 30000 }
+probes:
+  - id: home-page
+    service: web
+    request: { method: GET, path: / }
+    expect: { status: 200, bodyContains: "To-Do List" }
