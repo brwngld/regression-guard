@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type {
   ProbeDeclaration,
   ProbeOutcome,
@@ -6,6 +8,7 @@ import type {
 } from '../schema/service'
 import { startProcess, type RunningProcess } from '../exec/run'
 import { evaluateProbe } from './probe-eval'
+import { checkAgainstSchema, parseOpenApiDocument, resolveContractExpectation } from './contract'
 
 /**
  * M5 service verification runtime: boot each needed service inside an
@@ -14,6 +17,11 @@ import { evaluateProbe } from './probe-eval'
  * total by construction (one broken service or probe is recorded, never
  * propagated). The phase result is deterministic evidence, not a verdict:
  * interpretation happens upstream.
+ *
+ * M5b: probes with `expect.fromContract` resolve their expectation from the
+ * OpenAPI document recorded in the same worktree (`cwd`) and are validated
+ * against its declared operation (status + pinned-subset JSON schema); every
+ * unresolvable state is recorded as unknown, never a silent pass.
  */
 
 export interface ProbeExecutionOptions {
@@ -84,7 +92,7 @@ export async function runServiceProbes(options: ProbeExecutionOptions): Promise<
         servicesReady.push(service.name)
 
         for (const probe of probesOf(options.manifest, service.name)) {
-          probes.push(await executeProbe(probe, service))
+          probes.push(await executeProbe(probe, service, options.cwd))
         }
       } catch (error) {
         // Defensive totality: a broken service must not abort the phase.
@@ -140,8 +148,22 @@ async function waitForReadiness(service: ServiceDeclaration, proc: RunningProces
   }
 }
 
-/** One probe against a ready service: fetch with abort at timeoutMs, map the outcome. */
-async function executeProbe(probe: ProbeDeclaration, service: ServiceDeclaration): Promise<ProbeOutcome> {
+/**
+ * One probe against a ready service: fetch with abort at timeoutMs, map the outcome.
+ *
+ * A probe with `expect.fromContract` is judged ENTIRELY against the referenced
+ * OpenAPI operation (contract-sourced expectation); inline status/bodyContains
+ * are never consulted — fromContract takes precedence, so a probe cannot be
+ * rescued or condemned by a hand-written expectation next to the contract ref.
+ */
+async function executeProbe(
+  probe: ProbeDeclaration,
+  service: ServiceDeclaration,
+  cwd: string,
+): Promise<ProbeOutcome> {
+  if (probe.expect.fromContract !== undefined) {
+    return executeContractProbe(probe, service, cwd)
+  }
   const startedAt = Date.now()
   const url = `http://127.0.0.1:${service.readiness.port}${probe.request.path}`
   const method = probe.request.method
@@ -161,6 +183,7 @@ async function executeProbe(probe: ProbeDeclaration, service: ServiceDeclaration
       probeId: probe.id,
       service: probe.service,
       status: evaluation.passed ? 'passed' : 'failed',
+      expectation: 'inline',
       httpStatus: response.status,
       durationMs: Date.now() - startedAt,
       ...(evaluation.detail === '' ? {} : { detail: evaluation.detail }),
@@ -169,6 +192,110 @@ async function executeProbe(probe: ProbeDeclaration, service: ServiceDeclaration
     return {
       probeId: probe.id,
       service: probe.service,
+      status: 'unknown',
+      expectation: 'inline',
+      httpStatus: null,
+      durationMs: Date.now() - startedAt,
+      detail: networkErrorDetail(error, probe.timeoutMs),
+    }
+  }
+}
+
+/**
+ * One contract-sourced probe (M5b): resolve the declared OpenAPI operation
+ * FIRST (a missing document or an unresolvable ref is unknown — an OpenAPI
+ * document that is absent when referenced is NEVER equivalent to "no contract
+ * was requested"), then fetch and validate deterministically:
+ *
+ * - status mismatch vs the resolved declared status -> failed (inline-style detail)
+ * - declared schema: body must parse as JSON (failure -> failed), then
+ *   checkAgainstSchema — valid passes, invalid fails with the path-bearing
+ *   reason, and an unsupported construct is UNKNOWN (never silently passed,
+ *   never failed on a construct we cannot judge)
+ * - status-only contracts (no declared schema) validate the status only.
+ */
+async function executeContractProbe(
+  probe: ProbeDeclaration,
+  service: ServiceDeclaration,
+  cwd: string,
+): Promise<ProbeOutcome> {
+  const ref = probe.expect.fromContract!
+  const startedAt = Date.now()
+  const base = {
+    probeId: probe.id,
+    service: probe.service,
+    expectation: 'contract' as const,
+  }
+
+  const docText = await readFile(join(cwd, ref.file), 'utf8').catch(() => null)
+  const doc = parseOpenApiDocument(docText)
+  if (doc === null) {
+    return { ...base, status: 'unknown', httpStatus: null, durationMs: Date.now() - startedAt, detail: `contract document "${ref.file}" missing or unparseable` }
+  }
+  const resolution = resolveContractExpectation(doc, ref)
+  if (resolution.status === 'unresolvable') {
+    return { ...base, status: 'unknown', httpStatus: null, durationMs: Date.now() - startedAt, detail: resolution.reason }
+  }
+  const expectation = resolution.expectation
+
+  const url = `http://127.0.0.1:${service.readiness.port}${probe.request.path}`
+  const method = probe.request.method
+  const canSendBody = method !== 'GET' && method !== 'HEAD'
+  try {
+    const response = await fetchWithTimeout(url, probe.timeoutMs, {
+      method,
+      headers: probe.request.headers,
+      body: canSendBody ? probe.request.body : undefined,
+    })
+    if (response.status !== expectation.status) {
+      return {
+        ...base,
+        status: 'failed',
+        httpStatus: response.status,
+        durationMs: Date.now() - startedAt,
+        detail: `expected status ${expectation.status}, got ${response.status}`,
+      }
+    }
+    if (expectation.schema === undefined) {
+      // Status-only contract: the declaration asked nothing about the body.
+      return { ...base, status: 'passed', httpStatus: response.status, durationMs: Date.now() - startedAt }
+    }
+    const body = method === 'HEAD' ? '' : await response.text()
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(body)
+    } catch {
+      return {
+        ...base,
+        status: 'failed',
+        httpStatus: response.status,
+        durationMs: Date.now() - startedAt,
+        detail: 'response body is not valid JSON',
+      }
+    }
+    const check = checkAgainstSchema(parsed, expectation.schema)
+    if (check.verdict === 'valid') {
+      return { ...base, status: 'passed', httpStatus: response.status, durationMs: Date.now() - startedAt }
+    }
+    if (check.verdict === 'invalid') {
+      return {
+        ...base,
+        status: 'failed',
+        httpStatus: response.status,
+        durationMs: Date.now() - startedAt,
+        detail: check.reason,
+      }
+    }
+    return {
+      ...base,
+      status: 'unknown',
+      httpStatus: response.status,
+      durationMs: Date.now() - startedAt,
+      detail: `unsupported schema construct: ${check.keyword}`,
+    }
+  } catch (error) {
+    return {
+      ...base,
       status: 'unknown',
       httpStatus: null,
       durationMs: Date.now() - startedAt,
@@ -195,6 +322,7 @@ function unknownOutcome(probe: ProbeDeclaration, detail: string): ProbeOutcome {
     probeId: probe.id,
     service: probe.service,
     status: 'unknown',
+    expectation: probe.expect.fromContract ? 'contract' : 'inline',
     httpStatus: null,
     durationMs: 0,
     detail,

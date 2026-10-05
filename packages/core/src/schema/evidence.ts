@@ -7,7 +7,7 @@ import { ReproductionAssessmentSchema } from './reproduction'
  * `dependency`; later milestones add test/runtime/browser/api observations
  * without redefining what an Evidence object is.
  */
-export const EvidenceKindSchema = z.enum(['diff', 'dependency', 'test', 'runtime', 'browser', 'api'])
+export const EvidenceKindSchema = z.enum(['diff', 'dependency', 'test', 'runtime', 'browser', 'api', 'api-contract'])
 export type EvidenceKind = z.infer<typeof EvidenceKindSchema>
 
 export const EvidenceSchema = z.object({
@@ -62,12 +62,15 @@ export function severityForClass(findingClass: FindingClass | string): 'info' | 
     case 'preserved-area-changed':
     case 'test-regression':
     case 'service-regression':
+    case 'api-contract-regression':
       return 'critical'
     case 'changed-dependency':
     case 'pre-existing-failure':
     case 'baseline-incomplete':
     case 'test-command-changed':
     case 'service-manifest-changed':
+    case 'api-contract-changed':
+    case 'service-manifest-invalid':
       return 'info'
     default:
       return 'warn'

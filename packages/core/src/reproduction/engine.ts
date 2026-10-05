@@ -175,14 +175,22 @@ export function buildExperiments(
     let experiment: ReproductionExperiment | null = null
     if (finding.findingClass === 'test-regression') {
       experiment = buildTestExperiment(finding, context, nextExperimentId(experiments.length))
-    } else if (finding.findingClass === 'service-regression') {
+    } else if (
+      finding.findingClass === 'service-regression' ||
+      finding.findingClass === 'api-contract-regression'
+    ) {
+      // Contract-sourced probe regressions (M5b) reproduce exactly like inline
+      // ones: the probe id rides the shared `Probe "<id>"` message pattern, and
+      // the one-probe rerun performs the same contract evaluation because the
+      // filtered manifest copies the probe declaration — fromContract included —
+      // verbatim and the materialized worktree carries the recorded OpenAPI file.
       experiment = buildProbeExperiment(finding, context, nextExperimentId(experiments.length))
     } else if (GIT_DIFF_CLASSES.has(finding.findingClass)) {
       experiment = buildGitDiffExperiment(finding, context, nextExperimentId(experiments.length))
     }
     // unfulfilled-contract, pre-existing-failure, baseline-incomplete,
-    // test-command-changed, service-manifest-changed (and anything pathless)
-    // get no experiment.
+    // test-command-changed, service-manifest-changed, api-contract-changed,
+    // service-manifest-invalid (and anything pathless) get no experiment.
     if (experiment !== null) {
       experiments.push(experiment)
     }
@@ -292,13 +300,16 @@ function testTargetName(finding: Finding): string | undefined {
 }
 
 /**
- * `service-regression` experiment (M5): re-run the ONE failing probe against
- * the recorded after state. The structured command names an ENGINE-INTERNAL
- * execution path — the service startup is a repo-declared shell string from
- * the manifest, never a fixed binary, so no shell rendering exists: each
- * attempt materializes the recorded state fresh (M4.1), derives the manifest
- * from that state, and executes a one-probe run via the service runtime.
- * Returns null when the finding carries no quotable probe id.
+ * `service-regression` / `api-contract-regression` experiment (M5/M5b): re-run
+ * the ONE failing probe against the recorded after state. The structured
+ * command names an ENGINE-INTERNAL execution path — the service startup is a
+ * repo-declared shell string from the manifest, never a fixed binary, so no
+ * shell rendering exists: each attempt materializes the recorded state fresh
+ * (M4.1), derives the manifest from that state, and executes a one-probe run
+ * via the service runtime. The one-probe manifest copies the probe declaration
+ * verbatim, so a `fromContract` probe re-evaluates against the OpenAPI file
+ * recorded in the same materialized state. Returns null when the finding
+ * carries no quotable probe id.
  */
 function buildProbeExperiment(
   finding: Finding,

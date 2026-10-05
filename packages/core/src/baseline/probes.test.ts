@@ -15,10 +15,16 @@ const DIGEST_B = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 
 const side = (digest: string | null): ManifestSide => ({ digest, manifest: null })
 
-const probe = (probeId: string, status: ProbeOutcome['status'], detail?: string): ProbeOutcome => ({
+const probe = (
+  probeId: string,
+  status: ProbeOutcome['status'],
+  detail?: string,
+  expectation: ProbeOutcome['expectation'] = 'inline',
+): ProbeOutcome => ({
   probeId,
   service: 'api',
   status,
+  expectation,
   httpStatus: status === 'unknown' ? null : status === 'passed' ? 200 : 500,
   durationMs: 12,
   detail,
@@ -27,11 +33,12 @@ const probe = (probeId: string, status: ProbeOutcome['status'], detail?: string)
 const run = (
   label: 'before' | 'after',
   probes: ProbeOutcome[],
-  overrides: Partial<Pick<ProbeRunResult, 'manifestDigest' | 'servicesReady'>> = {},
+  overrides: Partial<Pick<ProbeRunResult, 'manifestDigest' | 'contractDigest' | 'servicesReady'>> = {},
 ): ProbeRunResult => ({
   label,
   ref: label === 'before' ? 'HEAD~1' : 'working-tree',
   manifestDigest: DIGEST_A,
+  contractDigest: null,
   servicesReady: probes.length > 0 ? ['api'] : [],
   probes,
   durationMs: 250,

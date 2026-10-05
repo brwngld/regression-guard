@@ -31,6 +31,12 @@ export const DEFAULT_POLICY: Record<FindingClass, PolicyAction> = {
   // the gate on its own (it forces partial probe comparability instead).
   'service-regression': 'reject',
   'service-manifest-changed': 'accept',
+  // Contract-sourced PASS -> FAIL probe transitions reject like the others;
+  // spec changes and invalid declarations are visible but force partial
+  // comparability rather than independently worsening the gate.
+  'api-contract-regression': 'reject',
+  'api-contract-changed': 'accept',
+  'service-manifest-invalid': 'accept',
 }
 
 const ACTION_RANK: Record<PolicyAction, number> = {

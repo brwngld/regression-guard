@@ -31,11 +31,36 @@ export const ServiceDeclarationSchema = z.object({
 })
 export type ServiceDeclaration = z.infer<typeof ServiceDeclarationSchema>
 
+/**
+ * Contract-sourced expectation (M5b): the response is validated against an
+ * operation declared in a repo-checked-in OpenAPI document. The spec supplies
+ * deterministic RUNTIME expectations for declared probes — this is not a
+ * spec-diff compatibility analyzer.
+ */
+export const ContractRefSchema = z.object({
+  /** Repo-relative path to the OpenAPI document (JSON or YAML). */
+  file: z.string().min(1),
+  method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']),
+  /** Operation path exactly as declared under openapi paths (e.g. '/health'). */
+  path: z.string().min(1),
+  /** Response status whose declaration becomes the expectation. */
+  status: z.number().int(),
+})
+export type ContractRef = z.infer<typeof ContractRefSchema>
+
 export const ProbeExpectationSchema = z.object({
   /** Expected HTTP status code. */
   status: z.number().int().optional(),
   /** Substring the response body must contain. */
   bodyContains: z.string().optional(),
+  /**
+   * When present, expectations are sourced from the referenced OpenAPI
+   * operation (status + declared JSON schema, validated against the PINNED
+   * subset). Takes precedence over inline status/bodyContains when both are
+   * given. Unresolvable refs / missing operations / unsupported schema
+   * constructs yield UNKNOWN, never silent passes.
+   */
+  fromContract: ContractRefSchema.optional(),
 })
 export type ProbeExpectation = z.infer<typeof ProbeExpectationSchema>
 
@@ -65,13 +90,24 @@ export type ServiceManifest = z.infer<typeof ServiceManifestSchema>
 export const ProbeOutcomeSchema = z.object({
   probeId: z.string(),
   service: z.string(),
-  /** passed = every expectation met; failed = expectation violated; unknown = execution error/timeout. */
+  /** passed = every expectation met; failed = expectation violated; unknown = execution error/timeout/unresolvable contract. */
   status: z.enum(['passed', 'failed', 'unknown']),
+  /** Which kind of expectation produced this outcome — routes the finding class on regression. */
+  expectation: z.enum(['inline', 'contract']).default('inline'),
   httpStatus: z.number().int().nullable(),
   durationMs: z.number().int(),
   detail: z.string().optional(),
 })
 export type ProbeOutcome = z.infer<typeof ProbeOutcomeSchema>
+
+/**
+ * Manifest-digest sentinel recorded for a side whose recorded state DECLARES a
+ * manifest that cannot be loaded (unparseable YAML / schema-invalid): the
+ * schema's `manifestDigest` is a plain string, so the invalid state is carried
+ * explicitly instead of being conflated with 'absent'. Never collides with a
+ * real digest (all real digests are `<prefix>_`-prefixed hashes).
+ */
+export const INVALID_MANIFEST_DIGEST = 'invalid'
 
 /** Per-side probe execution block on the baseline comparison. */
 export const ProbeRunResultSchema = z.object({
@@ -79,6 +115,13 @@ export const ProbeRunResultSchema = z.object({
   ref: z.string(),
   /** Manifest digest both sides were declared from (comparability). */
   manifestDigest: z.string(),
+  /**
+   * Per-side API-contract identity (M5b): a digest over the parsed OpenAPI
+   * documents this side's contract probes reference ('oasl_…'). null when no
+   * probe references a contract, or when a referenced document is
+   * missing/unparseable (the probes themselves report unknown with details).
+   */
+  contractDigest: z.string().nullable().default(null),
   /** Services that reached readiness within their timeout. */
   servicesReady: z.array(z.string()).default([]),
   probes: z.array(ProbeOutcomeSchema).default([]),

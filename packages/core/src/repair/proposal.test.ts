@@ -37,6 +37,9 @@ const EXPECTED_OBJECTIVES: Record<FindingClass, string> = {
   'test-command-changed': 'Reconcile the test command change or re-authorize the baseline.',
   'service-regression': 'Repair the service regression so the probe passes again.',
   'service-manifest-changed': 'Reconcile the service manifest change or re-authorize the probe baseline.',
+  'api-contract-regression': 'Repair the API contract violation so the contract-sourced probe passes again.',
+  'api-contract-changed': 'Reconcile the API specification change or re-authorize the contract baseline.',
+  'service-manifest-invalid': 'Fix the invalid service manifest so verification can execute.',
 }
 
 function contractOf(paths: Record<string, unknown> = {}): ChangeContract {

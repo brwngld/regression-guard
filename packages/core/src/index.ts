@@ -218,9 +218,11 @@ export {
   ProbeExpectationSchema,
   ProbeDeclarationSchema,
   ServiceManifestSchema,
+  ContractRefSchema,
   ProbeOutcomeSchema,
   ProbeRunResultSchema,
   SERVICE_MANIFEST_FILE,
+  INVALID_MANIFEST_DIGEST,
 } from './schema/service'
 export type {
   ServiceReadiness,
@@ -228,6 +230,7 @@ export type {
   ProbeExpectation,
   ProbeDeclaration,
   ServiceManifest,
+  ContractRef,
   ProbeOutcome,
   ProbeRunResult,
 } from './schema/service'
@@ -238,7 +241,14 @@ export { parseServiceManifest, manifestDigest } from './service/manifest'
 export { runServiceProbes } from './service/runtime'
 export type { ProbeExecutionOptions, ServicePhaseResult } from './service/runtime'
 
-export { compareManifests, probeTransitions, buildProbeFindings, probeBaselineStatus } from './baseline/probes'
+export {
+  compareManifests,
+  probeTransitions,
+  buildProbeFindings,
+  apiContractsDiverged,
+  buildManifestInvalidFinding,
+  probeBaselineStatus,
+} from './baseline/probes'
 export type {
   ManifestSide,
   ManifestComparison,
@@ -247,3 +257,7 @@ export type {
   ProbeStatusInput,
   ProbeStatusContribution,
 } from './baseline/probes'
+
+// M5b: discriminated manifest loading — absent vs valid vs invalid.
+export { loadServiceManifest } from './service/manifest'
+export type { ManifestLoadResult } from './service/manifest'

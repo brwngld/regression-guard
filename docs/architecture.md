@@ -33,6 +33,28 @@ Change Request → Change Producer → Verify the Change
 The product launches around AI coding agents because that is where the problem is
 currently most visible, but the engine is author-agnostic from day one.
 
+### Why the verifier is deterministic (engineering rationale)
+
+> **Verification adds the most value when the verifier's failure modes are
+> independent of the producer's. Regression Guard therefore verifies changes
+> through deterministic experiments and explicit evidence rather than
+> probabilistic judgment. When it cannot establish a fact, it reports
+> uncertainty rather than inferring safety.**
+
+"Verify the change, not the AI" is the memorable slogan; the paragraph above
+is the engineering rationale. An LLM verifier judging LLM-produced code
+inherits correlated failure modes — shared training distributions, shared
+blind spots, plausible-sounding wrong answers — so its second opinion is less
+independent than it feels. A deterministic verifier fails in legible, bounded
+ways (a graph missed an edge, a probe timed out, a manifest did not parse),
+and every such failure surfaces as `unknown` / `partial`, never as a confident
+wrong answer. AI may eventually draft *inputs* (contracts, candidate probes)
+through the same `status: proposed` → explicit-approval seam that repair
+proposals use, under one rule:
+
+> **AI may propose an experiment. AI may never decide what the experiment
+> proved.**
+
 ## Pipeline
 
 ```
@@ -217,7 +239,8 @@ Baseline Engine against the repository's existing tests; it reports
 | M2        | **Baseline Engine**: deterministic existing-test regression detection, `--working-tree` mode | **shipped** |
 | M3        | Impact Analyzer: evidence-backed blast radius, affected tests, impact coverage, prediction-vs-reality | **shipped** |
 | M4        | Reproduction engine, evidence packages, repair contract proposals | **shipped** |
-| M5        | **Service Verification**: declared HTTP services + deterministic probes (execution evidence; browser-DOM execution and LLM advisors deliberately deferred) | **shipped** |
+| M5a       | **Service Verification**: declared HTTP services + deterministic probes (execution evidence; browser-DOM execution and LLM advisors deliberately deferred) | **shipped** |
+| M5b       | **API Contract Verification**: contract-sourced probe expectations from repo-checked-in OpenAPI documents (pinned JSON-schema subset; separated manifest / contract / runtime identities) | **shipped** |
 
 ### Baseline Engine (M2)
 
@@ -310,7 +333,7 @@ scope) and A → C (final health) as full verifications. Lineage is explicit: a
 deterministic verification context id plus a unique run id. There is no
 automatic repair, no impact-derived permissions, and no orchestration.
 
-### Service Verification (M5)
+### Service Verification (M5a)
 
 Repositories DECLARE runnable services and deterministic HTTP probes in a
 checked-in manifest (`regression-guard.services.yaml`, trusted like
@@ -327,6 +350,30 @@ state, deriving the manifest immutably per side (recorded SHA, or verified
 fingerprint / base SHA in working-tree mode) with the same per-attempt
 materialization discipline as test experiments. Deliberately out of scope: no
 LLM, no browser-DOM execution engine, no generated tests.
+
+### API Contract Verification (M5b)
+
+A probe may source its expectation from the repository instead of spelling it
+inline: `expect.fromContract` names an OpenAPI operation (file, method, path,
+response status) in a repo-checked-in document, and the chain is declared
+probe → inline OR contract-sourced expectation → OpenAPI operation → runtime
+response → deterministic validation → PASS / FAIL / UNKNOWN — feeding the same
+transition table as everything else (contract-sourced PASS → FAIL is an
+`api-contract-regression` that REJECTs by default). The boundary is locked: the
+spec supplies RUNTIME expectations for declared probes; this is NOT a spec-diff
+compatibility analyzer. Schema validation is pinned to an explicit keyword
+subset — `type`, `properties`, `required`, `items`, `enum`, `nullable`,
+`additionalProperties` — and anything else (`pattern`, `format`, `oneOf`, …) is
+reported as unknown: never ignored (an ignored constraint would manufacture a
+pass the spec never declared), never failed (we cannot judge what we cannot
+validate). Three identities stay separated: the service manifest is WHAT
+EXECUTES, the API contract is WHAT IS PROMISED, the runtime observation is WHAT
+HAPPENED — so a changed openapi.yaml diverges the per-side contract digests
+(info finding, forced partial) instead of silently redefining what an endpoint
+promised, mirroring the branch-move rule. Manifest loading discriminates absent
+from invalid: absent means "no verification was declared" (the phase is
+skipped), invalid means "verification was declared incorrectly"
+(`service-manifest-invalid` info finding, no probes execute, forced partial).
 
 ## Repository layout
 

@@ -1,5 +1,6 @@
 import type { StateIdentity } from '../schema/reproduction'
 import type { VerificationReport } from '../schema/report'
+import { INVALID_MANIFEST_DIGEST } from '../schema/service'
 
 /** Short identity form for header lines: first ~16 characters + ellipsis. */
 function shortId(id: string, keep = 16): string {
@@ -117,9 +118,24 @@ export function renderMarkdownReport(report: VerificationReport): string {
       const failed = p.summary.regressed + p.summary.preExisting
       const inconclusive = p.summary.unknown
       const compared = passed + failed + inconclusive
-      push(
-        `- **Service probes:** ${compared} compared — ${passed} passed, ${failed} failed, ${inconclusive} inconclusive (manifest ${p.manifestMode}; services ready before/after: ${p.before.servicesReady.length}|${p.after.servicesReady.length})`,
-      )
+      let probesLine = `- **Service probes:** ${compared} compared — ${passed} passed, ${failed} failed, ${inconclusive} inconclusive (manifest ${p.manifestMode}; services ready before/after: ${p.before.servicesReady.length}|${p.after.servicesReady.length})`
+      // M5b annotations, compact: diverging recorded API contracts limit
+      // contract-probe comparability; an unloadable manifest means the
+      // declared probes never executed.
+      if (
+        p.before.contractDigest !== null &&
+        p.after.contractDigest !== null &&
+        p.before.contractDigest !== p.after.contractDigest
+      ) {
+        probesLine += '; API contract changed (non-comparable)'
+      }
+      if (
+        p.before.manifestDigest === INVALID_MANIFEST_DIGEST ||
+        p.after.manifestDigest === INVALID_MANIFEST_DIGEST
+      ) {
+        probesLine += '; manifest invalid'
+      }
+      push(probesLine)
     }
     push(`- **Executed:** \`${b.executedCommand}\` in isolated worktrees; the working checkout was not touched.`, '')
   }

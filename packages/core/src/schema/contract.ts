@@ -54,6 +54,10 @@ export const FindingClassSchema = z.enum([
   // M5 (service verification):
   'service-regression',
   'service-manifest-changed',
+  // M5b (API contract verification):
+  'api-contract-regression',
+  'api-contract-changed',
+  'service-manifest-invalid',
 ])
 export type FindingClass = z.infer<typeof FindingClassSchema>
 

@@ -1,4 +1,5 @@
 import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { runCommand, type RunOutcome } from '../exec/run'
@@ -12,9 +13,16 @@ import type {
   TestRunResult,
   TestTransition,
 } from '../schema/baseline'
-import { SERVICE_MANIFEST_FILE, type ProbeRunResult, type ServiceManifest } from '../schema/service'
-import { manifestDigest, parseServiceManifest } from '../service/manifest'
+import {
+  INVALID_MANIFEST_DIGEST,
+  SERVICE_MANIFEST_FILE,
+  type ProbeRunResult,
+  type ServiceManifest,
+} from '../schema/service'
+import { loadServiceManifest } from '../service/manifest'
+import { apiContractDigest, parseOpenApiDocument } from '../service/contract'
 import { runServiceProbes } from '../service/runtime'
+import { canonicalJson } from '../reproduction/identity'
 import type { GitAdapter } from '../vcs/git'
 import {
   discoverTestCommand,
@@ -25,10 +33,13 @@ import {
 import { parseRunnerJson } from './parse'
 import { classifyPerTest, classifySuite, summarize, suiteStatusOf, type SuiteStatus } from './compare'
 import {
+  apiContractsDiverged,
+  buildManifestInvalidFinding,
   buildProbeFindings,
   compareManifests,
   probeBaselineStatus,
   probeTransitions,
+  type ManifestSide,
   type ProbeStatusContribution,
 } from './probes'
 
@@ -170,25 +181,88 @@ export async function runBaselineVerification(options: BaselineOptions): Promise
   }
 }
 
-/** One side's service-manifest state, read from its materialized worktree. */
-interface ManifestSideOnDisk {
-  digest: string | null
-  manifest: ServiceManifest | null
-}
+/**
+ * One side's service-manifest state, kept DISCRIMINATED (M5b): absent means
+ * "no verification was declared", invalid means "verification was declared
+ * incorrectly" — different facts with different remedies, never merged.
+ */
+type ManifestSideState =
+  | { status: 'absent' }
+  | { status: 'valid'; digest: string; manifest: ServiceManifest }
+  | { status: 'invalid'; errors: string[] }
 
 /**
  * Digest sentinel recorded for a side whose recorded state declares no usable
  * manifest: the schema's `manifestDigest` is a string, while comparability was
- * already decided from the null digest via compareManifests.
+ * already decided from the discriminated load result. Invalid sides carry the
+ * shared INVALID_MANIFEST_DIGEST sentinel instead, so reports can tell the two
+ * apart; valid sides always carry their real 'svc_…' digest.
  */
 const ABSENT_MANIFEST_DIGEST = 'absent'
 
-async function readManifestSide(worktreeDir: string): Promise<ManifestSideOnDisk> {
+/** The manifestDigest string an empty (never-executed) run records for a side. */
+function manifestDigestSentinel(side: ManifestSideState): string {
+  if (side.status === 'valid') {
+    return side.digest
+  }
+  return side.status === 'invalid' ? INVALID_MANIFEST_DIGEST : ABSENT_MANIFEST_DIGEST
+}
+
+/** An honest empty run: this side's probes never executed. */
+function emptyProbeRun(label: 'before' | 'after', ref: string, side: ManifestSideState): ProbeRunResult {
+  return {
+    label,
+    ref,
+    manifestDigest: manifestDigestSentinel(side),
+    contractDigest: null,
+    servicesReady: [],
+    probes: [],
+    durationMs: 0,
+  }
+}
+
+async function readManifestSide(worktreeDir: string): Promise<ManifestSideState> {
   const text = await readFile(join(worktreeDir, SERVICE_MANIFEST_FILE), 'utf8').catch(() => null)
-  const manifest = parseServiceManifest(text)
-  return manifest === null
-    ? { digest: null, manifest: null }
-    : { digest: manifestDigest(manifest), manifest }
+  const result = loadServiceManifest(text)
+  if (result.status === 'valid') {
+    return { status: 'valid', digest: result.digest, manifest: result.manifest }
+  }
+  return result.status === 'invalid' ? { status: 'invalid', errors: result.errors } : { status: 'absent' }
+}
+
+/**
+ * Per-side API-contract identity (M5b): the DISTINCT sorted OpenAPI files the
+ * side's contract probes reference, each parsed from its worktree (the
+ * recorded state) and reduced to its `apiContractDigest`; the side digest is a
+ * manifestDigest-style hash over that sorted list ('oasl_…'). Any referenced
+ * document missing or unparseable -> null (the probes themselves report
+ * unknown with details — no identity is invented); sides whose probes
+ * reference no contract carry null.
+ */
+async function contractDigestForSide(
+  worktreeDir: string,
+  manifest: ServiceManifest,
+): Promise<string | null> {
+  const files = [
+    ...new Set(
+      manifest.probes.flatMap((probe) =>
+        probe.expect.fromContract === undefined ? [] : [probe.expect.fromContract.file],
+      ),
+    ),
+  ].sort()
+  if (files.length === 0) {
+    return null
+  }
+  const digests: string[] = []
+  for (const file of files) {
+    const text = await readFile(join(worktreeDir, file), 'utf8').catch(() => null)
+    const doc = parseOpenApiDocument(text)
+    if (doc === null) {
+      return null
+    }
+    digests.push(apiContractDigest(doc))
+  }
+  return `oasl_${createHash('sha256').update(canonicalJson(digests), 'utf8').digest('hex')}`
 }
 
 interface ServicePhaseInput {
@@ -212,18 +286,29 @@ interface ServicePhaseResult {
 /**
  * M5 service phase: run each side's declared probes inside its ALREADY
  * materialized worktree (the recorded state), then classify with the shared
- * transition table. Returns undefined when neither side declares a usable
- * manifest (mode 'none') — behavior identical to pre-M5. Even when the
- * manifests are non-comparable each side runs its OWN declaration: it is the
- * transition interpretation that gets limited, never execution.
+ * transition table. Returns undefined when neither side declares a manifest at
+ * all (mode 'none') — behavior identical to pre-M5. A manifest that is DECLARED
+ * but unloadable on any side short-circuits to `invalidManifestPhase`; even
+ * when the manifests are non-comparable each side runs its OWN declaration: it
+ * is the transition interpretation that gets limited, never execution.
  */
 async function runServicePhase(input: ServicePhaseInput): Promise<ServicePhaseResult | undefined> {
   const beforeSide = await readManifestSide(input.beforeDir)
   const afterSide = await readManifestSide(input.afterDir)
-  const comparison = compareManifests(beforeSide, afterSide)
-  if (comparison.mode === 'none') {
+  if (beforeSide.status === 'absent' && afterSide.status === 'absent') {
     return undefined
   }
+  if (beforeSide.status === 'invalid' || afterSide.status === 'invalid') {
+    return invalidManifestPhase(input, beforeSide, afterSide)
+  }
+
+  const toComparableSide = (side: ManifestSideState): ManifestSide =>
+    side.status === 'valid' ? { digest: side.digest, manifest: side.manifest } : { digest: null, manifest: null }
+  const comparison = compareManifests(toComparableSide(beforeSide), toComparableSide(afterSide))
+  // Both sides are valid here, so both digests are non-null and the mode can
+  // never be 'none' (that requires both digests null); narrow for the result.
+  const manifestMode: 'comparable' | 'non-comparable' =
+    comparison.mode === 'comparable' ? 'comparable' : 'non-comparable'
 
   const beforeRun = await runOneProbeSide('before', input.beforeRef, input.beforeDir, beforeSide)
   const afterRun = await runOneProbeSide('after', input.afterRef, input.afterDir, afterSide)
@@ -234,34 +319,76 @@ async function runServicePhase(input: ServicePhaseInput): Promise<ServicePhaseRe
   const status = probeBaselineStatus({
     transitions,
     summary,
-    manifestMode: comparison.mode,
+    manifestMode,
+    contractDigestsDiverged: apiContractsDiverged(beforeRun, afterRun),
     runs: [beforeRun, afterRun],
   })
-  return { before: beforeRun, after: afterRun, manifestMode: comparison.mode, transitions, summary, findings, status }
+  return { before: beforeRun, after: afterRun, manifestMode, transitions, summary, findings, status }
 }
 
-/** Execute one side's probes (or record an honest empty run when it declares no manifest). */
+/**
+ * Declared-but-unloadable manifest phase: when ANY side's manifest is invalid,
+ * no probes execute on EITHER side (each side's declaration would judge the
+ * other, so there is nothing comparable to run). Both runs are honestly empty
+ * with digest sentinels ('invalid' for invalid sides, 'absent' for absent
+ * ones, the real digest for a valid side); the comparison is non-comparable,
+ * the `service-manifest-invalid` finding is visible-but-never-worsening
+ * (gate: accept), and the probe contribution is forced partial with the
+ * invalid reason — never a silent pass.
+ */
+function invalidManifestPhase(
+  input: ServicePhaseInput,
+  beforeSide: ManifestSideState,
+  afterSide: ManifestSideState,
+): ServicePhaseResult {
+  const beforeRun = emptyProbeRun('before', input.beforeRef, beforeSide)
+  const afterRun = emptyProbeRun('after', input.afterRef, afterSide)
+  const invalidSides: Array<{ label: 'before' | 'after'; errors: string[] }> = []
+  if (beforeSide.status === 'invalid') {
+    invalidSides.push({ label: 'before', errors: beforeSide.errors })
+  }
+  if (afterSide.status === 'invalid') {
+    invalidSides.push({ label: 'after', errors: afterSide.errors })
+  }
+  const transitions = probeTransitions([], [])
+  const summary = summarize(transitions)
+  return {
+    before: beforeRun,
+    after: afterRun,
+    manifestMode: 'non-comparable',
+    transitions,
+    summary,
+    findings: [buildManifestInvalidFinding(invalidSides)],
+    status: probeBaselineStatus({
+      transitions,
+      summary,
+      manifestMode: 'non-comparable',
+      manifestInvalid: true,
+      runs: [beforeRun, afterRun],
+    }),
+  }
+}
+
+/**
+ * Execute one side's probes; a side with no usable manifest (absent while the
+ * other side declares one) records an honest empty run instead.
+ */
 async function runOneProbeSide(
   label: 'before' | 'after',
   ref: string,
   worktreeDir: string,
-  side: ManifestSideOnDisk,
+  side: ManifestSideState,
 ): Promise<ProbeRunResult> {
-  if (side.manifest === null) {
-    return {
-      label,
-      ref,
-      manifestDigest: ABSENT_MANIFEST_DIGEST,
-      servicesReady: [],
-      probes: [],
-      durationMs: 0,
-    }
+  if (side.status !== 'valid') {
+    return emptyProbeRun(label, ref, side)
   }
   const phase = await runServiceProbes({ cwd: worktreeDir, manifest: side.manifest })
+  const contractDigest = await contractDigestForSide(worktreeDir, side.manifest)
   return {
     label,
     ref,
-    manifestDigest: side.digest ?? ABSENT_MANIFEST_DIGEST,
+    manifestDigest: side.digest,
+    contractDigest,
     servicesReady: phase.servicesReady,
     probes: phase.probes,
     durationMs: phase.durationMs,
