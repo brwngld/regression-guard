@@ -105,7 +105,7 @@ describe('buildExperiments', () => {
     })
   })
 
-  it('uses HEAD as the after token in working-tree mode', () => {
+  it('uses the recorded baseSha (not the movable HEAD label) as the after token in working-tree mode', () => {
     const workingTree = context({
       after: {
         label: 'working-tree',
@@ -119,7 +119,23 @@ describe('buildExperiments', () => {
       [finding('S-001', 'prohibited-change', { paths: ['src/x.ts'] })],
       workingTree,
     )
-    expect(experiment?.command.args).toEqual(['diff', BEFORE_SHA, 'HEAD', '--', 'src/x.ts'])
+    expect(experiment?.command.args).toEqual(['diff', BEFORE_SHA, 'c4'.padEnd(40, 'c4'), '--', 'src/x.ts'])
+  })
+
+  it('carries immutable SHAs — never the labels — in the git-diff command args', () => {
+    // Labels deliberately distinct from (and confusable with) the SHAs: a ref
+    // named like a short SHA must not leak into the authoritative command.
+    const ctx = context({
+      before: { label: 'develop', kind: 'ref', sha: BEFORE_SHA },
+      after: { label: 'release/candidate', kind: 'ref', sha: AFTER_SHA },
+    })
+    const [experiment] = buildExperiments(
+      [finding('S-001', 'prohibited-change', { paths: ['src/x.ts'] })],
+      ctx,
+    )
+    expect(experiment?.command.args).toEqual(['diff', BEFORE_SHA, AFTER_SHA, '--', 'src/x.ts'])
+    expect(experiment?.command.args).not.toContain('develop')
+    expect(experiment?.command.args).not.toContain('release/candidate')
   })
 
   it('emits deterministic, class-specific purpose strings', () => {
@@ -291,6 +307,8 @@ const GIT_DIFF_EXPERIMENT: ReproductionExperiment = {
 function attempt(index: number, outcome: AttemptOutcome): ReproductionAttempt {
   return {
     index,
+    experimentId: EXPERIMENT.id,
+    stateIdentity: EXPERIMENT.stateIdentity,
     outcome,
     exitCode: outcome === 'reproduced' ? 1 : outcome === 'not-reproduced' ? 0 : null,
     durationMs: 10,
@@ -407,6 +425,20 @@ describe('aggregateAssessment semantics table', () => {
     expect(assessment.sourceFindingIds).toEqual(['TEST-001'])
 
     attempts[0]!.outcome = 'not-reproduced'
+    attempts[0]!.experimentId = 'REPRO-999'
+    attempts[0]!.stateIdentity = { label: 'mutated', kind: 'ref', sha: 'm1'.padEnd(40, 'm1') }
     expect(assessment.attempts[0]!.outcome).toBe('reproduced')
+    expect(assessment.attempts[0]!.experimentId).toBe('REPRO-001')
+    expect(assessment.attempts[0]!.stateIdentity).toEqual(EXPERIMENT.stateIdentity)
+  })
+
+  it('attributes every attempt independently: experiment id + the state identity it ran against', () => {
+    const attempts = attemptsOf({ reproduced: 2, notReproduced: 1, inconclusive: 0 })
+    const assessment = aggregateAssessment(EXPERIMENT, attempts, true, 3)
+    expect(assessment.attempts).toHaveLength(3)
+    for (const attempt of assessment.attempts) {
+      expect(attempt.experimentId).toBe(EXPERIMENT.id)
+      expect(attempt.stateIdentity).toEqual(EXPERIMENT.stateIdentity)
+    }
   })
 })

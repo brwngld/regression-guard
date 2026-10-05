@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { verifyChange } from '../src/pipeline'
 import { buildExperiments, runExperiments, type ExperimentContext } from '../src/reproduction/engine'
@@ -5,13 +8,18 @@ import { GitAdapter } from '../src/vcs/git'
 import { TempRepo } from './helpers/repo'
 
 /**
- * M4 integration: reproduction, stability accounting, state identity, evidence
- * packages, and repair proposals — over real temporary repositories. The
- * load-bearing invariants under test:
+ * M4/M4.1 integration: reproduction, stability accounting, state identity,
+ * evidence packages, and repair proposals — over real temporary repositories.
+ * The load-bearing invariants under test:
  *   - no reproduction outcome ever deletes, downgrades, or re-gates M2's
  *     findings (the verdict stays attributable to the actual regression);
  *   - reproduction never mutates the user checkout;
- *   - state-identity mismatch aborts execution rather than improvising;
+ *   - every attempt gets FRESH materialization: attempt N cannot observe
+ *     filesystem mutations from attempt N-1 (external conditions may vary,
+ *     repository state may not);
+ *   - execution uses immutable identities (SHAs/fingerprints); labels are
+ *     presentation only and can move without affecting reproduction;
+ *   - state-identity mismatch aborts per attempt rather than improvising;
  *   - restoration is an operation constraint, never disguised permission.
  */
 
@@ -20,17 +28,19 @@ const PERMISSIVE = (mustChange: string) =>
 
 describe('M4: reproduction stability accounting', () => {
   it('the nasty mixed sequence FAIL/PASS/FAIL/TIMEOUT/FAIL keeps the finding, the verdict, and reports honest counts', async () => {
-    // Behavior is a function of (worktree state, invocation number within
-    // that worktree). The change introduces a 'strict-mode' flag file, so:
-    // BEFORE worktree (no flag), invocation 1 -> PASS (green baseline);
-    // AFTER worktree (M2 run), invocation 1 -> FAIL (regression observed);
-    // REPRODUCTION worktree (fresh, with flag), invocations 1..5 ->
-    // fail, pass, fail, HANG (killed by the engine timeout), fail.
+    // The variance source is EXTERNAL to the reproduced repository state: a
+    // counter file outside every worktree drives a fixed global sequence.
+    // Invocation order: M2-before=1, M2-after=2, reproduction=3..7.
+    // Desired: 1 pass (green baseline), 2 fail (regression), then
+    // fail, pass, fail, HANG (killed by the engine timeout), fail —
+    // identical repository state every attempt, varying external condition.
+    // That is the only thing 'unstable'-style results legitimately mean.
+    const seqDir = await mkdtemp(join(tmpdir(), 'rg-seq-'))
     const FLAKY_RUNNER = `import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 
 const strict = existsSync('strict-mode')
-const counter = new URL('./attempt-count', import.meta.url)
+const counter = '${seqDir.replace(/\\/g, '/')}/count'
 let count = 0
 try {
   count = Number(await readFile(counter, 'utf8')) || 0
@@ -38,19 +48,19 @@ try {
 await writeFile(counter, String(count + 1))
 const index = count + 1
 
-if (index === 2) {
-  console.log('flaky: passing invocation')
+if (index === 1 || index === 4) {
+  console.log('flaky: passing invocation', index)
   process.exit(0)
 }
-if (index === 4) {
+if (index === 6) {
   console.log('flaky: hanging invocation')
   // Stay alive until the engine's timeout kills the process tree.
   setInterval(() => {}, 60000)
 } else if (strict) {
-  console.log('flaky: failing invocation (strict state)')
+  console.log('flaky: failing invocation', index)
   process.exit(1)
 } else {
-  console.log('flaky: ok (lenient state)')
+  console.log('flaky: ok (lenient state)', index)
   process.exit(0)
 }
 `
@@ -106,6 +116,69 @@ if (index === 4) {
     expect(status.trim()).toBe('')
     const worktrees = (await repo.git('worktree', 'list', '--porcelain')).trim().split('\n\n').length
     expect(worktrees).toBe(1)
+    await repo.destroy()
+    await rm(seqDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {})
+  })
+
+  it('M4.1: every attempt gets fresh materialization — attempt N cannot observe attempt N-1 mutations', async () => {
+    // The runner plants a marker file on its first invocation in a given
+    // worktree and PASSES whenever the marker already exists. With per-attempt
+    // fresh materialization every attempt starts clean: all 5 attempts plant
+    // the marker and fail. Under the old shared-worktree behavior attempts
+    // 2..5 would see the marker and pass — so 5/5-reproduced is a real lock.
+    const MARKER_RUNNER = `import { existsSync, writeFileSync } from 'node:fs'
+
+const strict = existsSync('strict-mode')
+if (existsSync('was-here')) {
+  console.log('marker: CONTAMINATED start (marker survived)')
+  process.exit(0)
+}
+writeFileSync('was-here', 'attempt was here')
+if (strict) {
+  console.log('marker: clean start, failing (strict state)')
+  process.exit(1)
+}
+console.log('marker: clean start, ok (lenient state)')
+process.exit(0)
+`
+    const repo = await TempRepo.create({
+      'package.json': JSON.stringify(
+        { name: 'marker-app', version: '1.0.0', type: 'module', scripts: { test: 'node tools/marker.js' } },
+        null,
+        2,
+      ),
+      'tools/marker.js': MARKER_RUNNER,
+      'README.md': '# marker\n',
+    })
+    await repo.git('branch', 'base')
+    await repo.write({ 'strict-mode': 'on\n' })
+    await repo.commit('introduce strict behavior')
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: `version: 1\nid: m4-marker\ngoal: strict mode\npaths:\n  mustChange: ["strict-mode"]\nreproduction:\n  attempts: 5\n  timeoutMs: 10000\n`,
+    })
+
+    // Baseline: lenient state passes; after state fails -> regression.
+    expect(report.threeQuestions.regressions).toMatchObject({ status: 'fail', regressionsFound: 1 })
+    const reproduction = report.findings.find((f) => f.findingClass === 'test-regression')?.reproduction
+    expect(reproduction).toMatchObject({
+      attemptsRequested: 5,
+      attemptsCompleted: 5,
+      reproduced: 5,
+      notReproduced: 0,
+      inconclusive: 0,
+      stability: 'stable',
+      stateMatched: true,
+    })
+    // Per-attempt attribution: every attempt records its experiment and the
+    // immutable state it executed against.
+    for (const attempt of reproduction?.attempts ?? []) {
+      expect(attempt.experimentId).toMatch(/^REPRO-/)
+      expect(attempt.stateIdentity).toMatchObject({ kind: 'ref', sha: report.afterSha })
+    }
     await repo.destroy()
   })
 
@@ -213,12 +286,85 @@ describe('M4: state identity', () => {
     expect(experiments).toHaveLength(1)
     const assessments = await runExperiments(experiments, context)
 
+    // M4.1: every attempt is individually recorded as inconclusive with full
+    // attribution — the drift is detected PER ATTEMPT, never improvised past.
     expect(assessments[0]).toMatchObject({
       stateMatched: false,
       stability: 'inconclusive',
       attemptsRequested: 3,
       attemptsCompleted: 0,
-      attempts: [],
+      reproduced: 0,
+      notReproduced: 0,
+      inconclusive: 3,
+    })
+    expect(assessments[0]?.attempts).toHaveLength(3)
+    for (const attempt of assessments[0]?.attempts ?? []) {
+      expect(attempt.outcome).toBe('inconclusive')
+      expect(attempt.detail).toContain('fingerprint')
+      expect(attempt.stateIdentity.fingerprint).toBe(fingerprint)
+    }
+    await repo.destroy()
+  })
+
+  it('M4.1: moving a branch after verification cannot change what reproduction executes (labels are presentation, SHAs are execution)', async () => {
+    const repo = await TempRepo.create({
+      'package.json': JSON.stringify(
+        { name: 'refmove-app', version: '1.0.0', type: 'module', scripts: { test: 'node tools/suite.js' } },
+        null,
+        2,
+      ),
+      'tools/suite.js': "console.log('ok')\n",
+      'src/auth.ts': 'export const auth = 1\n',
+      'README.md': '# refmove\n',
+    })
+    await repo.git('branch', 'base')
+
+    // The violating state B: feature branch changes src/auth.ts.
+    await repo.git('checkout', '-q', '-b', 'feat')
+    await repo.write({ 'src/auth.ts': 'export const auth = 2\n' })
+    await repo.commit('quietly change auth')
+    const featSha = (await repo.git('rev-parse', 'HEAD')).trim()
+    const baseSha = (await repo.git('rev-parse', 'base')).trim()
+
+    // AFTER verification is recorded, the branch KEEPS MOVING — and the new
+    // commit reverts the very change the finding is about. Label-based
+    // execution would diff base..feat-at-HEAD and see nothing; SHA-based
+    // execution must still see the recorded A->B change.
+    await repo.write({ 'src/auth.ts': 'export const auth = 1\n' })
+    await repo.commit('revert auth change on feat (moves the label)')
+
+    const git = await GitAdapter.open(repo.dir)
+    const context: ExperimentContext = {
+      git,
+      before: { label: 'base', kind: 'ref' as const, sha: baseSha },
+      after: { label: 'feat', kind: 'ref' as const, sha: featSha },
+      testPlan: null,
+      config: { attempts: 5, timeoutMs: 10_000 },
+    }
+    const experiments = buildExperiments(
+      [
+        {
+          id: 'SCOPE-001',
+          findingClass: 'prohibited-change',
+          severity: 'critical',
+          message: 'src/auth.ts changed but the contract prohibits it.',
+          paths: ['src/auth.ts'],
+          evidence: { kind: 'diff', claim: 'c', observation: 'o', changedLines: [], reproduction: 'git diff' },
+        },
+      ],
+      context,
+    )
+    expect(experiments).toHaveLength(1)
+    // The structured command carries the immutable SHAs, never the labels.
+    expect(experiments[0]?.command.args).toContain(baseSha)
+    expect(experiments[0]?.command.args).toContain(featSha)
+    expect(experiments[0]?.command.args).not.toContain('feat')
+
+    const assessments = await runExperiments(experiments, context)
+    expect(assessments[0]).toMatchObject({
+      stateMatched: true,
+      stability: 'stable',
+      reproduced: 1,
     })
     await repo.destroy()
   })

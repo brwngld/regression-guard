@@ -21,13 +21,22 @@ import type { GitAdapter } from '../vcs/git'
 /**
  * M4 Reproduction Engine. A finding is stronger evidence when it can be
  * reproduced: experiments re-execute deterministic evidence against the EXACT
- * recorded state, in an isolated worktree, and the assessment qualifies
- * stability without ever rewriting the original observation (M2's finding
- * stands regardless of the reproduction outcome).
+ * recorded state, and the assessment qualifies stability without ever
+ * rewriting the original observation (M2's finding stands regardless of the
+ * reproduction outcome).
+ *
+ * M4.1 invariants:
+ * - Attempt isolation: every attempt gets a FRESH materialization (its own
+ *   mkdtemp base, worktree, and dependency restoration), so attempt outcomes
+ *   can never be contaminated by earlier attempts' filesystem side effects.
+ * - Immutable execution: only immutable identities (recorded SHAs, verified
+ *   fingerprints) cross the execution boundary; labels are presentation.
+ * - Per-attempt attribution: every recorded attempt carries its experiment id
+ *   and the state identity it executed against.
  *
  * The user's checkout is never mutated: worktrees live in mkdtemp directories
  * and are removed even on failure. Working-tree states are guarded by the
- * M2.1 fingerprint — if the tree drifted since verification, nothing executes.
+ * M2.1 fingerprint — re-verified per attempt; on drift nothing executes.
  */
 
 export interface ExperimentContext {
@@ -224,7 +233,11 @@ function buildGitDiffExperiment(
     return null
   }
   const beforeToken = refToken(context.before)
-  const afterToken = context.after.kind === 'ref' ? refToken(context.after) : 'HEAD'
+  // Immutable SHAs, never labels: labels are presentation and can move after
+  // verification. In working-tree mode the recorded baseSha is the after-side
+  // immutable anchor ('HEAD' is a label that resolves differently later).
+  const afterToken =
+    context.after.kind === 'ref' ? refToken(context.after) : (context.after.baseSha ?? 'HEAD')
   return {
     id,
     kind: 'git-diff',
@@ -250,9 +263,10 @@ function refToken(identity: StateIdentity): string {
 
 /**
  * Execute experiments in isolation, sequentially (deterministic). NEVER
- * touches the user checkout: test experiments materialize an isolated
- * worktree per experiment and remove it afterwards; git-diff experiments
- * re-derive evidence read-only through the git adapter.
+ * touches the user checkout: test experiments materialize a FRESH isolated
+ * worktree per ATTEMPT and remove it afterwards (attempt isolation — see
+ * runTestExperiment); git-diff experiments re-derive evidence read-only
+ * through the git adapter.
  */
 export async function runExperiments(
   experiments: ReproductionExperiment[],
@@ -270,9 +284,26 @@ export async function runExperiments(
 }
 
 /**
+ * The immutable token an EXECUTION path may use: the recorded SHA (or, for
+ * working-tree bases, the base SHA). Labels never cross the execution
+ * boundary — they are presentation and can move after verification. Throws
+ * when an identity carries no immutable token at all.
+ */
+function immutableToken(identity: StateIdentity): string {
+  if (identity.sha !== null) {
+    return identity.sha
+  }
+  if (identity.baseSha !== undefined) {
+    return identity.baseSha
+  }
+  throw new Error(`state '${identity.label}' carries no immutable SHA to execute against`)
+}
+
+/**
  * git-diff experiment: no worktree needed. Ref mode re-derives via
- * diffRefs(before.label, after.label); working-tree mode re-derives
- * diffWorkingTree NOW and requires the fingerprint to still match.
+ * diffRefs(before SHA, after SHA) — the recorded immutable identities, never
+ * the labels; working-tree mode re-derives diffWorkingTree NOW against the
+ * recorded before SHA and requires the fingerprint to still match.
  * Reproduced iff the finding's path appears among the re-derived records.
  * One attempt only — the evidence is deterministic.
  */
@@ -285,10 +316,13 @@ async function runGitDiffExperiment(
   try {
     let records: ChangeRecord[]
     if (context.after.kind === 'ref') {
-      // Refs are immutable → stateMatched = true.
-      records = (await context.git.diffRefs(context.before.label, context.after.label)).records
+      // Refs are immutable → stateMatched = true. Execute by SHA: a label can
+      // have moved to a different commit since verification.
+      records = (
+        await context.git.diffRefs(immutableToken(context.before), immutableToken(context.after))
+      ).records
     } else {
-      const rederived = await context.git.diffWorkingTree(context.before.label)
+      const rederived = await context.git.diffWorkingTree(immutableToken(context.before))
       const current = rederived.workingTree?.fingerprint
       const recorded = context.after.fingerprint
       if (recorded === undefined || current !== recorded) {
@@ -305,6 +339,8 @@ async function runGitDiffExperiment(
     const durationMs = Date.now() - startedAt
     const attempt: ReproductionAttempt = {
       index: 1,
+      experimentId: experiment.id,
+      stateIdentity: { ...experiment.stateIdentity },
       outcome: hit !== undefined ? 'reproduced' : 'not-reproduced',
       // No child process ran; 0 denotes "the deterministic evidence step completed".
       exitCode: 0,
@@ -325,37 +361,74 @@ async function runGitDiffExperiment(
 }
 
 /**
- * Test experiment: materialize the recorded after state exactly, then run the
- * attempt loop N times in the SAME worktree. Working-tree states are
- * fingerprint-checked first; on drift nothing executes (stateMatched false).
+ * Test experiment: EVERY attempt executes against a FRESH isolated
+ * materialization of the recorded state (mkdtemp base → worktree at the
+ * recorded immutable SHA, plus the verified overlay in working-tree mode →
+ * dependency restoration → execution → cleanup). Attempt N therefore never
+ * runs on filesystem state left behind by attempt N-1, so outcome variance
+ * means genuine inconsistency, never cross-attempt contamination. Working-tree
+ * states are fingerprint-verified PER ATTEMPT (the developer may keep editing
+ * between attempts); a mismatched attempt is recorded as inconclusive with
+ * stateMatched-false semantics and never executes. Cost is accepted
+ * deliberately: correctness over performance (no caching, no state reset).
  */
 async function runTestExperiment(
   experiment: ReproductionExperiment,
   context: ExperimentContext,
 ): Promise<AssessmentWithDetail> {
   const requested = context.config.attempts
-  const baseDir = await mkdtemp(join(tmpdir(), 'rg-repro-'))
+  const attempts: ReproductionAttempt[] = []
+  let stateMatched = true
+  for (let index = 1; index <= requested; index += 1) {
+    const isolated = await runIsolatedAttempt(experiment, context, index)
+    attempts.push(isolated.attempt)
+    if (!isolated.stateMatched) {
+      stateMatched = false
+    }
+  }
+  return aggregateAssessment(experiment, attempts, stateMatched, requested)
+}
+
+/**
+ * One attempt inside its own fresh materialization. Nothing crosses the
+ * attempt boundary: a new mkdtemp base per attempt, worktree creation from
+ * the recorded SHA (never a label), the same selectDependencyInstall
+ * discipline per materialization, and cleanup in finally (removeWorktree +
+ * retrying rm) even on failure.
+ */
+async function runIsolatedAttempt(
+  experiment: ReproductionExperiment,
+  context: ExperimentContext,
+  index: number,
+): Promise<{ attempt: ReproductionAttempt; stateMatched: boolean }> {
+  let baseDir: string | null = null
   let worktreeDir: string | null = null
   try {
-    // State verification + materialization.
+    baseDir = await mkdtemp(join(tmpdir(), 'rg-repro-'))
+
+    // State verification + materialization, per attempt.
     let overlay: ChangeRecord[] | undefined
     let checkoutRef: string
     if (context.after.kind === 'ref') {
-      // Refs are immutable → stateMatched = true.
-      checkoutRef = context.after.sha ?? context.after.label
+      // Refs are immutable → stateMatched = true. The checkout target is the
+      // recorded SHA; a label may have moved since verification.
+      checkoutRef = immutableToken(context.after)
     } else {
-      const rederived = await context.git.diffWorkingTree(context.before.label)
+      // Re-derive per attempt against the recorded immutable before SHA; the
+      // developer may keep editing, so the fingerprint is verified EVERY attempt.
+      const rederived = await context.git.diffWorkingTree(immutableToken(context.before))
       const current = rederived.workingTree?.fingerprint
       const recorded = context.after.fingerprint
       if (recorded === undefined || current !== recorded) {
-        // Never silently reproduce against a different state.
-        return withDetail(
-          aggregateAssessment(experiment, [], false, requested),
-          fingerprintMismatchDetail(recorded, current),
-        )
+        // Never silently reproduce against a different state. This attempt is
+        // inconclusive with stateMatched-false semantics; no execution.
+        return {
+          attempt: unexecutedAttempt(experiment, index, fingerprintMismatchDetail(recorded, current)),
+          stateMatched: false,
+        }
       }
       overlay = rederived.records
-      checkoutRef = context.after.baseSha ?? rederived.workingTree?.baseSha ?? 'HEAD'
+      checkoutRef = context.after.baseSha ?? rederived.workingTree?.baseSha ?? immutableToken(context.after)
     }
 
     worktreeDir = join(baseDir, 'worktree')
@@ -367,37 +440,52 @@ async function runTestExperiment(
     // Dependency restoration, exactly as baseline discovery dictates.
     const installFailure = await restoreDependencies(worktreeDir, context)
     if (installFailure !== null) {
-      const attempts: ReproductionAttempt[] = []
-      for (let index = 1; index <= requested; index += 1) {
-        attempts.push({
+      // The state matched and materialized; the toolchain could not be
+      // restored, so the test command never executed in THIS attempt.
+      return {
+        attempt: unexecutedAttempt(
+          experiment,
           index,
-          outcome: 'inconclusive',
-          exitCode: null,
-          durationMs: 0,
-          timedOut: installFailure.timedOut,
-          detail: `dependency installation failed (${installFailure.strategy}, exit ${installFailure.exitCode ?? 'killed'}): the test command never executed`,
-        })
+          `dependency installation failed (${installFailure.strategy}, exit ${installFailure.exitCode ?? 'killed'}): the test command never executed`,
+          installFailure.timedOut,
+        ),
+        stateMatched: true,
       }
-      return withDetail(aggregateAssessment(experiment, attempts, true, requested), installFailure.detail)
     }
 
-    // Attempt loop: same materialized worktree for every attempt.
-    const attempts: ReproductionAttempt[] = []
-    for (let index = 1; index <= requested; index += 1) {
-      attempts.push(await runSingleAttempt(experiment, context, worktreeDir, index))
-    }
-    return aggregateAssessment(experiment, attempts, true, requested)
+    return { attempt: await runSingleAttempt(experiment, context, worktreeDir, index), stateMatched: true }
   } catch (error) {
-    return withDetail(
-      aggregateAssessment(experiment, [], false, requested),
-      `state could not be materialized: ${errorMessage(error)}`,
-    )
+    return {
+      attempt: unexecutedAttempt(experiment, index, `state could not be materialized: ${errorMessage(error)}`),
+      stateMatched: false,
+    }
   } finally {
     if (worktreeDir !== null) {
       await context.git.removeWorktree(worktreeDir).catch(() => {})
     }
-    // Retries: Windows may briefly lock files held by just-killed trees.
-    await rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {})
+    if (baseDir !== null) {
+      // Retries: Windows may briefly lock files held by just-killed trees.
+      await rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {})
+    }
+  }
+}
+
+/** An attempt that never executed: attributable to its experiment and the recorded state, with the reason. */
+function unexecutedAttempt(
+  experiment: ReproductionExperiment,
+  index: number,
+  detail: string,
+  timedOut: boolean = false,
+): ReproductionAttempt {
+  return {
+    index,
+    experimentId: experiment.id,
+    stateIdentity: { ...experiment.stateIdentity },
+    outcome: 'inconclusive',
+    exitCode: null,
+    durationMs: 0,
+    timedOut,
+    detail,
   }
 }
 
@@ -443,7 +531,10 @@ export function aggregateAssessment(
     inconclusive,
     stability,
     granularity: experiment.granularity,
-    attempts: attempts.map((attempt) => ({ ...attempt })),
+    attempts: attempts.map((attempt) => ({
+      ...attempt,
+      stateIdentity: attempt.stateIdentity === undefined ? undefined : { ...attempt.stateIdentity },
+    })),
     stateIdentity: { ...experiment.stateIdentity },
     stateMatched,
   }
@@ -505,14 +596,11 @@ async function runSingleAttempt(
   try {
     command = commandStringFor(experiment.command)
   } catch (error) {
-    return {
+    return unexecutedAttempt(
+      experiment,
       index,
-      outcome: 'inconclusive',
-      exitCode: null,
-      durationMs: 0,
-      timedOut: false,
-      detail: `command could not be rendered safely: ${errorMessage(error)}`,
-    }
+      `command could not be rendered safely: ${errorMessage(error)}`,
+    )
   }
 
   const outcome = await runCommand(command, { cwd: worktreeDir, timeoutMs: context.config.timeoutMs })
@@ -523,6 +611,8 @@ async function runSingleAttempt(
 
   return {
     index,
+    experimentId: experiment.id,
+    stateIdentity: { ...experiment.stateIdentity },
     outcome: decision.outcome,
     exitCode: outcome.exitCode,
     durationMs: outcome.durationMs,

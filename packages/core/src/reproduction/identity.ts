@@ -1,22 +1,32 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
+import type { ChangeContract } from '../schema/contract'
 import type { StateIdentity } from '../schema/reproduction'
 
 /**
  * M4 lineage identity — two deliberately distinct notions:
  *
  * - verificationContextId: a deterministic content hash of (contract identity
- *   + before/after state identities + finding identities). It answers "is this
- *   logically the same verification situation?" across runs and repair loops.
- * - verificationRunId: a unique execution identifier (context prefix + time
- *   suffix). It answers "which actual execution produced this evidence?".
+ *   INCLUDING its rule content + before/after state identities + finding
+ *   identities). It answers "is this logically the same verification
+ *   situation?" across runs and repair loops.
+ * - verificationRunId: a unique execution identifier (context prefix + time +
+ *   cryptographic entropy). It answers "which actual execution produced this
+ *   evidence?".
  *
- * Everything here is pure and deterministic: the same logical input always
- * yields the same context id, on every machine, in every timezone.
+ * Everything here except the run id's entropy is pure and deterministic: the
+ * same logical input always yields the same context id, on every machine, in
+ * every timezone.
  */
 
 export interface LineageInput {
   contractId: string
   contractVersion: number
+  /**
+   * Content fingerprint of the PARSED contract (see contractFingerprint). Id
+   * and version are authored labels: materially different rules under the same
+   * id/version must not collide into one context identity.
+   */
+  contractFingerprint: string
   before: StateIdentity
   after: StateIdentity
   /** Sorted upstream; sorted defensively anyway so ordering cannot drift the id. */
@@ -30,12 +40,14 @@ export function canonicalJson(value: unknown): string {
 
 /**
  * Deterministic comparison identity: full sha256 hex over the canonical
- * lineage, prefixed 'ctx_'.
+ * lineage (contract identity including its content fingerprint), prefixed
+ * 'ctx_'.
  */
 export function verificationContextId(input: LineageInput): string {
   const payload = {
     contractId: input.contractId,
     contractVersion: input.contractVersion,
+    contractFingerprint: input.contractFingerprint,
     before: canonicalStateIdentity(input.before),
     after: canonicalStateIdentity(input.after),
     findingIds: [...input.findingIds].sort(),
@@ -44,13 +56,27 @@ export function verificationContextId(input: LineageInput): string {
 }
 
 /**
+ * Deterministic fingerprint of the PARSED canonical contract (not the raw
+ * YAML): semantically identical contracts hash identically; any rule
+ * difference diverges. canonicalJson sorts keys recursively and drops
+ * undefined, and zod-parsed contracts have defaults filled — so differently
+ * formatted (or partially defaulted) but semantically identical YAML yields
+ * identical parsed objects and therefore identical fingerprints.
+ */
+export function contractFingerprint(contract: ChangeContract): string {
+  return `cfx_${sha256Hex(canonicalJson(contract))}`
+}
+
+/**
  * Unique execution id: 'run_' + first 12 hex of the context hash + '_' + a
- * basic ISO timestamp (YYYYMMDDTHHMMSSZ, UTC). The context prefix keeps run
- * ids traceable to their lineage; the timestamp keeps executions distinct.
+ * basic ISO timestamp (YYYYMMDDTHHMMSSZ, UTC) + '_' + cryptographically
+ * random hex. The context prefix keeps run ids traceable to their lineage;
+ * the timestamp orders executions; the entropy makes the id collision-
+ * resistant — two executions within the same second must never share an id.
  */
 export function verificationRunId(contextId: string, at: Date = new Date()): string {
   const hex = contextId.startsWith('ctx_') ? contextId.slice('ctx_'.length) : contextId
-  return `run_${hex.slice(0, 12)}_${basicIsoUtc(at)}`
+  return `run_${hex.slice(0, 12)}_${basicIsoUtc(at)}_${randomBytes(8).toString('hex')}`
 }
 
 /** Recursively sort object keys and drop undefined fields so hashing is stable. */

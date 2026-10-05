@@ -24,7 +24,7 @@ import {
   type AssessmentWithDetail,
   type ExperimentContext,
 } from './reproduction/engine'
-import { verificationContextId, verificationRunId } from './reproduction/identity'
+import { contractFingerprint, verificationContextId, verificationRunId } from './reproduction/identity'
 import { buildEvidencePackage } from './repair/proposal'
 import { GitAdapter } from './vcs/git'
 
@@ -146,10 +146,11 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
   const gate = applyPolicy(findings, contract.policy as Partial<Record<FindingClass, PolicyAction>>)
 
   // M4 lineage. Two deliberately distinct identities: the context id is a
-  // deterministic hash of (contract identity + compared state identities +
-  // finding identities) — the same logical verification situation yields the
-  // same id across runs and repair loops; the run id additionally carries a
-  // timestamp so each execution stays distinguishable.
+  // deterministic hash of (contract identity — id, version AND parsed content
+  // fingerprint — + compared state identities + finding identities) — the same
+  // logical verification situation yields the same id across runs and repair
+  // loops; the run id additionally carries a timestamp and random entropy so
+  // each execution stays distinguishable.
   const beforeState: StateIdentity = { label: input.before, kind: 'ref', sha: changeSet.beforeSha }
   const afterState: StateIdentity =
     mode === 'working-tree'
@@ -166,6 +167,7 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
   const contextId = verificationContextId({
     contractId: contract.id,
     contractVersion: contract.version,
+    contractFingerprint: contractFingerprint(contract),
     before: beforeState,
     after: afterState,
     findingIds: findings.map((finding) => finding.id),

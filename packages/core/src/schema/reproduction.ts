@@ -75,6 +75,19 @@ export type AttemptOutcome = z.infer<typeof AttemptOutcomeSchema>
 export const ReproductionAttemptSchema = z.object({
   /** 1-based attempt number. */
   index: z.number().int(),
+  /**
+   * Per-attempt attribution (M4.1): the experiment this attempt belongs to.
+   * Optional only for backward compatibility with pre-M4.1 persisted
+   * assessments — the reproduction engine records it on EVERY attempt.
+   */
+  experimentId: z.string().optional(),
+  /**
+   * Per-attempt attribution (M4.1): the recorded state identity this attempt
+   * executed against (for attempts that never executed, the identity that
+   * failed verification — the reason is in `detail`). Optional only for
+   * backward compatibility; the engine records it on EVERY attempt.
+   */
+  stateIdentity: StateIdentitySchema.optional(),
   outcome: AttemptOutcomeSchema,
   exitCode: z.number().int().nullable(),
   durationMs: z.number().int(),
