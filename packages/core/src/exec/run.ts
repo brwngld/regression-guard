@@ -88,8 +88,6 @@ export function runCommand(
   options: { cwd: string; timeoutMs: number; env?: NodeJS.ProcessEnv },
 ): Promise<RunOutcome> {
   const isWindows = process.platform === 'win32'
-  const shell = isWindows ? (process.env.ComSpec ?? 'cmd.exe') : '/bin/sh'
-  const shellArgs = isWindows ? ['/d', '/s', '/c', command] : ['-c', command]
 
   return new Promise((resolve) => {
     const startedAt = Date.now()
@@ -99,8 +97,15 @@ export function runCommand(
     let timedOut = false
     let settled = false
 
-    const child = spawn(shell, shellArgs, {
+    // Single-string shell invocation (never spawn(shell, [argv..., command])):
+    // passing the command as one escaped argv element mangles embedded double
+    // quotes through cmd.exe on Windows — quoted arguments such as
+    // `-t "test name"` would arrive WITH literal quote characters and break
+    // argument parsing. The shell:true path wraps the string the same way
+    // child_process.exec does, which preserves quoted arguments exactly.
+    const child = spawn(command, {
       cwd: options.cwd,
+      shell: true,
       detached: !isWindows,
       windowsHide: true,
       env: { ...process.env, ...(options.env ?? {}), NO_COLOR: '1' },

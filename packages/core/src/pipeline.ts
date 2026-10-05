@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import picomatch from 'picomatch'
 import { enrichChangeSet } from './analyzer/change'
@@ -10,10 +12,20 @@ import { renderMarkdownReport } from './report/markdown'
 import { ContractValidationError, parseContract } from './schema/contract'
 import type { ChangeContract, FindingClass, PolicyAction } from './schema/contract'
 import type { Finding } from './schema/evidence'
-import type { PredictionReview } from './schema/impact'
+import type { ImpactAssessment, PredictionReview } from './schema/impact'
+import type { ReproductionAssessment, StateIdentity } from './schema/reproduction'
 import { REPORT_SCHEMA_VERSION } from './schema/report'
 import type { VerificationReport } from './schema/report'
 import { runBaselineVerification } from './baseline/runner'
+import { discoverTestCommand, packageJsonHasDependencies } from './baseline/discover'
+import {
+  buildExperiments,
+  runExperiments,
+  type AssessmentWithDetail,
+  type ExperimentContext,
+} from './reproduction/engine'
+import { verificationContextId, verificationRunId } from './reproduction/identity'
+import { buildEvidencePackage } from './repair/proposal'
 import { GitAdapter } from './vcs/git'
 
 export const DEFAULT_TEST_TIMEOUT_MS = 300_000
@@ -32,6 +44,8 @@ export interface VerifyInput {
   runTests?: boolean
   /** Per-run timeout for test execution in each worktree. */
   testTimeoutMs?: number
+  /** false disables reproduction; otherwise overrides contract defaults. */
+  reproduction?: false | { attempts?: number; timeoutMs?: number }
 }
 
 export interface VerifyOutput extends VerificationReport {
@@ -52,7 +66,8 @@ function parseContractYaml(text: string): unknown {
  * Full pipeline:
  *   contract → git diff → enrichment → intelligence graph → scope analysis →
  *   baseline engine (existing tests, before ↔ after) → impact analysis
- *   (report-only annotation) → integrity gate → evidence-backed report.
+ *   (report-only annotation) → integrity gate → reproduction (M4, enrichment
+ *   only — never re-gates) → evidence-backed report with evidence package.
  */
 export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
   const contract =
@@ -130,6 +145,86 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
   const findings = [...scopeFindings, ...baselineFindings]
   const gate = applyPolicy(findings, contract.policy as Partial<Record<FindingClass, PolicyAction>>)
 
+  // M4 lineage. Two deliberately distinct identities: the context id is a
+  // deterministic hash of (contract identity + compared state identities +
+  // finding identities) — the same logical verification situation yields the
+  // same id across runs and repair loops; the run id additionally carries a
+  // timestamp so each execution stays distinguishable.
+  const beforeState: StateIdentity = { label: input.before, kind: 'ref', sha: changeSet.beforeSha }
+  const afterState: StateIdentity =
+    mode === 'working-tree'
+      ? {
+          label: 'working-tree',
+          kind: 'working-tree',
+          sha: null,
+          baseSha: changeSet.workingTree?.baseSha,
+          fingerprint: changeSet.workingTree?.fingerprint,
+        }
+      // Refs mode always resolves the after SHA (diffRefs rev-parses it);
+      // null is a working-tree-mode-only value.
+      : { label: input.after ?? 'HEAD', kind: 'ref', sha: changeSet.afterSha! }
+  const contextId = verificationContextId({
+    contractId: contract.id,
+    contractVersion: contract.version,
+    before: beforeState,
+    after: afterState,
+    findingIds: findings.map((finding) => finding.id),
+  })
+  const runId = verificationRunId(contextId)
+
+  // Reproduction Engine (M4): re-execute deterministic evidence against the
+  // EXACT recorded state, in isolation. Enrichment only — no outcome ever
+  // deletes, downgrades, or re-gates the findings above.
+  let assessments: ReproductionAssessment[] = []
+  const reproductionConfig =
+    input.reproduction === false
+      ? null
+      : {
+          attempts: input.reproduction?.attempts ?? contract.reproduction.attempts,
+          timeoutMs: input.reproduction?.timeoutMs ?? contract.reproduction.timeoutMs,
+        }
+  if (reproductionConfig !== null && findings.length > 0) {
+    // Re-derive the test plan deterministically from the after state, read
+    // exactly as the baseline runner reads it.
+    const afterPkgText =
+      mode === 'working-tree'
+        ? await readFile(join(git.repoRoot, 'package.json'), 'utf8').catch(() => null)
+        : await git.readFileAt(input.after ?? 'HEAD', 'package.json')
+    const plan = discoverTestCommand(afterPkgText)
+    const experimentContext: ExperimentContext = {
+      git,
+      before: beforeState,
+      after: afterState,
+      testPlan:
+        plan === null
+          ? null
+          : {
+              runner: plan.runner,
+              userCommand: plan.userCommand,
+              buildExecutedCommand: plan.buildExecutedCommand,
+              testCommandInstalled: packageJsonHasDependencies(afterPkgText),
+            },
+      config: reproductionConfig,
+    }
+    const experiments = buildExperiments(findings, experimentContext)
+    if (experiments.length > 0) {
+      assessments = (await runExperiments(experiments, experimentContext)).map(stripRuntimeDetail)
+    }
+  }
+
+  // Enrich the gate's ordered findings after the fact: order and ids are
+  // preserved and the gate decision itself is never recomputed.
+  const reproductionByFinding = new Map<string, ReproductionAssessment>()
+  for (const assessment of assessments) {
+    for (const findingId of assessment.sourceFindingIds) {
+      reproductionByFinding.set(findingId, assessment)
+    }
+  }
+  const reportedFindings = gate.findings.map((finding) => {
+    const reproduction = reproductionByFinding.get(finding.id)
+    return reproduction === undefined ? finding : { ...finding, reproduction }
+  })
+
   const mustChangeGlobs = contract.paths.mustChange.filter(
     (rule): rule is string => typeof rule === 'string',
   )
@@ -161,6 +256,8 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
   const report: VerificationReport = {
     schemaVersion: REPORT_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
+    verificationContextId: contextId,
+    verificationRunId: runId,
     contractId: contract.id,
     goal: contract.goal,
     repoRoot: git.repoRoot,
@@ -172,7 +269,7 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
     verdict: gate.verdict,
     triggeredActions: gate.triggeredActions,
     perPath: assessment.perPath,
-    findings: gate.findings,
+    findings: reportedFindings,
     statistics: {
       filesChanged: assessment.perPath.length,
       expected: count('EXPECTED'),
@@ -193,7 +290,54 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
     report.workingTree = changeSet.workingTree
   }
 
+  // Evidence Package (M4): the evidence-backed problem statement handed to a
+  // change producer, including the PROPOSAL-ONLY repair contract. Findings
+  // imply changed records, which imply impact — the empty guard below only
+  // covers a hypothetical findings-without-records run.
+  if (findings.length > 0) {
+    report.evidencePackage = buildEvidencePackage({
+      contract,
+      findings: reportedFindings,
+      scopeAssessment: assessment.perPath,
+      impact: impact ?? EMPTY_IMPACT,
+      reproductions: assessments,
+      stateIdentities: { before: beforeState, after: afterState },
+      verificationRunId: runId,
+      verificationContextId: contextId,
+      repositoryPaths: Object.keys(graph.files),
+      verdict: gate.verdict,
+    })
+  }
+
   return { ...report, markdown: renderMarkdownReport(report), json: JSON.stringify(report, null, 2) }
+}
+
+/** Minimal empty impact model for the guarded evidence-package path. */
+const EMPTY_IMPACT: ImpactAssessment = {
+  seeds: [],
+  affected: [],
+  affectedTests: [],
+  coverage: {
+    affectedAreas: 0,
+    coveredAreas: 0,
+    uncoveredAreas: 0,
+    coveragePercent: 0,
+    covered: [],
+    uncovered: [],
+  },
+  unresolvedEdges: [],
+  repositoryUnresolvedEdges: [],
+  completeness: 'complete',
+}
+
+/**
+ * runExperiments may attach a runtime-only `detail` to an assessment; the
+ * persisted ReproductionAssessment schema has no such field, so it is stripped
+ * before the assessment is attached to a finding or the evidence package.
+ */
+function stripRuntimeDetail(assessment: AssessmentWithDetail): ReproductionAssessment {
+  const { detail: _detail, ...persisted } = assessment
+  return persisted
 }
 
 function pathMatchesGlob(path: string, glob: string): boolean {

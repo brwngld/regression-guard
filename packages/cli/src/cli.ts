@@ -70,6 +70,7 @@ program
   .option('--after <ref>', 'git ref of the changed state (required unless --working-tree)')
   .option('--working-tree', 'verify uncommitted changes on top of --before, without committing')
   .option('--skip-tests', 'skip regression verification (regressions stay not-verified)')
+  .option('--skip-reproduction', 'skip N-of-M reproduction of findings')
   .option('--test-timeout <ms>', 'per-run timeout for test execution', '300000')
   .option('--cwd <dir>', 'repository (or any directory inside it)', process.cwd())
   .option('--format <kind>', 'report format: markdown or json', 'markdown')
@@ -81,6 +82,7 @@ program
       after?: string
       workingTree?: boolean
       skipTests?: boolean
+      skipReproduction?: boolean
       testTimeout: string
       cwd: string
       format: string
@@ -114,6 +116,7 @@ program
         after: options.workingTree ? undefined : options.after,
         mode: options.workingTree ? 'working-tree' : 'refs',
         runTests: !options.skipTests,
+        reproduction: options.skipReproduction ? false : undefined,
         testTimeoutMs,
         contract: contractText,
       })

@@ -73,16 +73,21 @@ export function parseRunnerJson(
       continue
     }
     const rawName = suite.name
-    // File identities in this engine are always repo-relative posix paths;
-    // normalize runner-emitted separators (Windows backslashes) regardless of
-    // whether the worktree prefix stripped.
+    // File identities in this engine are always repo-relative posix paths.
+    // The prefix comparison normalizes separators on BOTH sides: some runners
+    // (vitest) emit posix-style absolute paths even on Windows, while the
+    // worktree directory is backslashed — without this, the prefix never
+    // strips and finding paths remain stale absolute worktree paths (which
+    // later break reproduction file arguments and impact joins).
     const suiteName =
       typeof rawName === 'string'
-        ? (
-            options.stripPrefix && rawName.startsWith(options.stripPrefix)
-              ? rawName.slice(options.stripPrefix.length).replace(/^[\\/]/, '')
-              : rawName
-          ).replace(/\\/g, '/')
+        ? (() => {
+            const normalized = rawName.replace(/\\/g, '/')
+            const prefix = options.stripPrefix?.replace(/\\/g, '/')
+            return prefix && normalized.startsWith(prefix)
+              ? normalized.slice(prefix.length).replace(/^\//, '')
+              : normalized
+          })()
         : undefined
 
     const assertions = suite.assertionResults

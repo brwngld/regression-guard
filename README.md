@@ -61,6 +61,7 @@ npx regression-guard verify ... --test-timeout 120000
 A contract looks like this (see [examples/todo-app/contracts/ui-polish.yaml](examples/todo-app/contracts/ui-polish.yaml)):
 
 ```yaml
+version: 1
 id: todo-ui-polish
 goal: Polish the to-do app's visual styling without touching persistence behavior
 paths:
@@ -70,6 +71,9 @@ paths:
   prohibited:
     - category: dependency-addition
     - category: env-secrets
+reproduction:
+  attempts: 5      # bounded N-of-M reruns of findings (1-10)
+  timeoutMs: 30000
 ```
 
 Every changed file between the two refs is classified:
@@ -93,8 +97,15 @@ overridable per finding class in the contract.
 | M1 | Change Contract, Repository Intelligence (module graph), Change Analyzer, **Scope Analyzer**, Integrity Gate, evidence-backed reports | **shipped** |
 | M2 | **Baseline Engine**: existing-test regression detection (per-test where the runner provides outcomes, suite-level fallback), `--working-tree` mode, hard timeouts with process-tree kill | **shipped** |
 | M3 | **Impact Analyzer**: evidence-backed blast radius, affected tests, impact coverage, prediction-vs-reality (report-only, never gates) | **shipped** |
-| M4 | Evidence reproduction, repair-loop report contract | planned |
+| M4 | **Reproduction & Repair Preparation**: exact-state N-of-M reproduction with honest stability accounting, evidence packages, `proposed` repair contracts (editable / restore-to-baseline / prohibited), dual-baseline lineage | **shipped** |
 | M5 | LLM advisors (contract inference, test generation), browser/API/security verification, CI actions | planned |
+
+Reproduction enriches findings without ever rewriting them: an `unstable` or
+`not-reproduced` assessment qualifies confidence, but M2's observed regression
+stands and the verdict is unchanged. Repair contracts leave the engine as
+`status: proposed` only — approval happens explicitly outside Regression
+Guard, and restoration (`restore-to-baseline`) is an operation constraint, not
+permission to redesign. Use `--skip-reproduction` to skip the N-of-M reruns.
 
 Regression classification is conservative at every branch: PASS→PASS is
 preserved, PASS→FAIL is a regression (REJECT by default), FAIL→FAIL is

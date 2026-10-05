@@ -91,6 +91,63 @@ export type {
   ImpactAssessment,
 } from './schema/impact'
 
+export {
+  StateIdentitySchema,
+  ExperimentKindSchema,
+  ExperimentGranularitySchema,
+  ReproductionCommandSchema,
+  ReproductionExperimentSchema,
+  AttemptOutcomeSchema,
+  ReproductionAttemptSchema,
+  ReproductionStabilitySchema,
+  ReproductionAssessmentSchema,
+  ReproductionConfigSchema,
+} from './schema/reproduction'
+export type {
+  StateIdentity,
+  ExperimentKind,
+  ExperimentGranularity,
+  ReproductionCommand,
+  ReproductionExperiment,
+  AttemptOutcome,
+  ReproductionAttempt,
+  ReproductionStability,
+  ReproductionAssessment,
+  ReproductionConfig,
+} from './schema/reproduction'
+
+export {
+  RepairPathModeSchema,
+  RepairPathConstraintSchema,
+  RepairStateIdentitiesSchema,
+  RepairContractProposalSchema,
+  EvidencePackageImpactSchema,
+  EvidencePackageSchema,
+} from './schema/repair'
+export type {
+  RepairPathMode,
+  RepairPathConstraint,
+  RepairStateIdentities,
+  RepairContractProposal,
+  EvidencePackageImpact,
+  EvidencePackage,
+} from './schema/repair'
+
+export {
+  buildExperiments,
+  runExperiments,
+  aggregateAssessment,
+  shellQuote,
+  commandStringFor,
+} from './reproduction/engine'
+export type { ExperimentContext, AssessmentWithDetail } from './reproduction/engine'
+
+export { verificationContextId, verificationRunId, canonicalJson } from './reproduction/identity'
+export type { LineageInput } from './reproduction/identity'
+
+export { buildEvidencePackage } from './repair/proposal'
+export type { PackageInput } from './repair/proposal'
+
 export { GitError } from './vcs/exec'
 export { GitAdapter } from './vcs/git'
 export { parseNameStatus, parseUnifiedDiff } from './vcs/parse'

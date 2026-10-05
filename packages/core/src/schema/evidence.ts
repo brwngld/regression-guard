@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { FindingClassSchema, type FindingClass } from './contract'
+import { ReproductionAssessmentSchema } from './reproduction'
 
 /**
  * Discriminator for how the evidence was produced. M1 emits only `diff` and
@@ -46,6 +47,12 @@ export const FindingSchema = z.object({
   message: z.string(),
   paths: z.array(z.string()).default([]),
   evidence: EvidenceSchema,
+  /**
+   * M4 enrichment: reproduction results qualify the finding's stability.
+   * Evidence only — no reproduction outcome ever deletes, downgrades, or
+   * re-gates the original observation.
+   */
+  reproduction: ReproductionAssessmentSchema.optional(),
 })
 export type Finding = z.infer<typeof FindingSchema>
 

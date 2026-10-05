@@ -4,6 +4,7 @@ import { PathAssessmentSchema } from './scope'
 import { VerdictSchema } from './gate'
 import { BaselineComparisonSchema } from './baseline'
 import { ImpactAssessmentSchema } from './impact'
+import { EvidencePackageSchema } from './repair'
 
 /** Reports carry an explicit schema version so consumers can evolve independently. */
 export const REPORT_SCHEMA_VERSION = 1
@@ -51,6 +52,16 @@ export type ReportStatistics = z.infer<typeof ReportStatisticsSchema>
 export const VerificationReportSchema = z.object({
   schemaVersion: z.literal(REPORT_SCHEMA_VERSION),
   generatedAt: z.string(),
+  /**
+   * M4 lineage — two distinct identities:
+   * - verificationContextId: deterministic content hash of (contract identity +
+   *   before/after state identities + finding identities). Answers "is this
+   *   logically the same verification situation?" across runs and repair loops.
+   * - verificationRunId: unique execution identifier (context prefix + time
+   *   suffix). Answers "which actual execution produced this evidence?".
+   */
+  verificationContextId: z.string(),
+  verificationRunId: z.string(),
   contractId: z.string(),
   goal: z.string(),
   repoRoot: z.string(),
@@ -73,5 +84,7 @@ export const VerificationReportSchema = z.object({
   baseline: BaselineComparisonSchema.optional(),
   /** M3 impact intelligence — report-only, never gates. */
   impact: ImpactAssessmentSchema.optional(),
+  /** M4 evidence package with repair proposal — emitted when findings exist. */
+  evidencePackage: EvidencePackageSchema.optional(),
 })
 export type VerificationReport = z.infer<typeof VerificationReportSchema>

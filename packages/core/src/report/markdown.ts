@@ -1,4 +1,19 @@
+import type { StateIdentity } from '../schema/reproduction'
 import type { VerificationReport } from '../schema/report'
+
+/** Short identity form for header lines: first ~16 characters + ellipsis. */
+function shortId(id: string, keep = 16): string {
+  return id.length <= keep ? id : `${id.slice(0, keep)}…`
+}
+
+/** Compact state identity: `label (sha)` or `label (base sha, fp fingerprint…)`. */
+function stateIdentityPhrase(state: StateIdentity): string {
+  const identity =
+    state.sha !== null
+      ? state.sha.slice(0, 10)
+      : `base ${state.baseSha?.slice(0, 10) ?? '?'}, fp ${state.fingerprint?.slice(0, 19) ?? '?'}…`
+  return `\`${state.label}\` (${identity})`
+}
 
 function classificationMark(classification: string): string {
   switch (classification) {
@@ -54,6 +69,7 @@ export function renderMarkdownReport(report: VerificationReport): string {
   push(`- **Contract:** ${report.contractId} — ${report.goal}`)
   push(`- **Compared:** ${compared}`)
   push(`- **Generated:** ${report.generatedAt}`)
+  push(`- **Run:** \`${shortId(report.verificationRunId)}\` (context \`${shortId(report.verificationContextId)}\`)`)
   push('', '---', '')
   push(`## Verdict: ${report.verdict}`, '')
 
@@ -210,7 +226,53 @@ export function renderMarkdownReport(report: VerificationReport): string {
       push(`- **Changed lines:** \`${changed.file}\` ${hunks}`)
     }
     push(`- **Reproduce:** \`${finding.evidence.reproduction}\``)
+    // M4 enrichment: reproduction qualifies the finding's stability; it never
+    // replaces or downgrades the observation above.
+    const reproduction = finding.reproduction
+    if (reproduction !== undefined) {
+      push(
+        `- **Reproduction:** ${reproduction.reproduced}/${reproduction.attemptsRequested} attempts reproduced — stability ${reproduction.stability.toUpperCase()}, granularity ${reproduction.granularity}`,
+      )
+      push(
+        `  against ${stateIdentityPhrase(reproduction.stateIdentity)}${reproduction.stateMatched ? '' : ' — state mismatch, not executed'}`,
+      )
+    }
     push('')
+  }
+
+  if (report.evidencePackage !== undefined) {
+    const pkg = report.evidencePackage
+    const proposal = pkg.repairProposal
+    push('## Evidence package & repair proposal', '')
+    push(
+      `Verdict **${pkg.verdict}** produced an evidence package; the repair proposal (status: **${proposal.status}**) targets ${proposal.targetFindingIds.length} finding(s).`,
+      '',
+    )
+    if (proposal.objectives.length > 0) {
+      push(`Objectives: ${proposal.objectives.join(' ')}`, '')
+    }
+    push(
+      'Path constraints — EDITABLE (repair latitude) · RESTORE-TO-BASELINE (revert toward A, never redesign) · PROHIBITED (untouchable):',
+      '',
+    )
+    push('```')
+    for (const constraint of proposal.pathConstraints) {
+      push(`${constraint.path} — ${constraint.mode.toUpperCase()}`)
+    }
+    push('```', '')
+    push(
+      `Must preserve: ${proposal.mustPreserve.length > 0 ? proposal.mustPreserve.map((rule) => `\`${rule}\``).join(', ') : '—'}`,
+      '',
+    )
+    push('Evidence a repair change must provide:', '')
+    for (const requirement of proposal.evidenceRequired) {
+      push(`- ${requirement}`)
+    }
+    push('', `_${proposal.approvalNote}_`, '')
+    push(
+      'Repair verification is the dual comparison B → C (repair scope) and A → C (final health), to be run as full verifications once a repair exists.',
+      '',
+    )
   }
 
   push('---', '')

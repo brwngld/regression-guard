@@ -80,6 +80,13 @@ export const ChangeContractSchema = z.object({
   })),
   acceptance: z.array(AcceptanceCriterionSchema).default([]),
   policy: z.record(z.string(), PolicyActionSchema).default({}),
+  /** Bounded N-of-M reproduction configuration (M4). Attempts are capped at 10. */
+  reproduction: z
+    .object({
+      attempts: z.number().int().min(1).max(10).default(5),
+      timeoutMs: z.number().int().positive().default(30_000),
+    })
+    .default(() => ({ attempts: 5, timeoutMs: 30_000 })),
 })
 export type ChangeContract = z.infer<typeof ChangeContractSchema>
 

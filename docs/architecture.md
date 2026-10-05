@@ -216,7 +216,7 @@ Baseline Engine against the repository's existing tests; it reports
 | M1        | Change Contract, Repository Intelligence (module graph), Change Analyzer, **Scope Analyzer**, Integrity Gate, Evidence-backed report | **shipped** |
 | M2        | **Baseline Engine**: deterministic existing-test regression detection, `--working-tree` mode | **shipped** |
 | M3        | Impact Analyzer: evidence-backed blast radius, affected tests, impact coverage, prediction-vs-reality | **shipped** |
-| M4        | Evidence reproduction (flaky re-runs), repair-loop report contract | planned |
+| M4        | Reproduction engine, evidence packages, repair contract proposals | **shipped** |
 | M5        | LLM advisors, browser/API/contract/security/adversarial verification, non-JS languages, CI actions | planned |
 
 ### Baseline Engine (M2)
@@ -275,6 +275,40 @@ tests against M2's observed regressions — a prediction miss measures analyzer
 incompleteness, never extra risk in the change. The invariant: M3 informs but
 never reduces M2's full baseline — `--affected-only` is deliberately absent
 until prediction data justifies it.
+
+### Reproduction & Repair Preparation (M4)
+
+Findings become **structured experiments**: a command is executable + args (the
+authoritative form; any human-readable rendering is derived, never the source
+of truth) plus the exact state it must run against. Experiments re-execute the
+evidence in isolated worktrees — the user's checkout is never mutated — and in
+working-tree mode the M2.1 fingerprint is re-verified first: if the tree
+drifted since verification, nothing executes and the assessment is honestly
+`inconclusive` with `stateMatched: false`; a different state is never silently
+substituted. Test reruns climb a case → file → suite granularity ladder and
+record the rung actually achieved, never a finer one (unsafely quotable test
+names force a downgrade rather than an unsafe shell string).
+
+Reproduction is bounded N-of-M — default 5 attempts, capped at 10 — with
+deliberately conservative stability semantics: any inconclusive attempt makes
+the headline INCONCLUSIVE while the honest counts stay visible, and `unstable`
+means consistent inconsistency across identical reruns, not statistical
+flakiness. Reproduction only *enriches* findings; it never deletes, downgrades,
+or re-gates an M2 observation, and the gate verdict is never recomputed from
+reproduction outcomes.
+
+When findings exist, the report carries an **Evidence Package**: the enriched
+findings, scope, impact, and reproductions, plus a Repair Contract with
+`status: proposed`. Every changed path gets exactly one operation constraint —
+`editable`, `restore-to-baseline` (an operation constraint — revert toward the
+original baseline, never permission to redesign), or `prohibited` for unchanged
+paths the contract bans. Approval of a repair is explicitly outside Regression
+Guard: impact analysis may inform the proposal but grants no permission. The
+package carries dual-baseline state identities — A (original baseline) and B
+(violating state) — so a future repair C can be verified both B → C (repair
+scope) and A → C (final health) as full verifications. Lineage is explicit: a
+deterministic verification context id plus a unique run id. There is no
+automatic repair, no impact-derived permissions, and no orchestration.
 
 ## Repository layout
 
