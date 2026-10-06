@@ -345,14 +345,69 @@ describe('M5b.1: per-probe contract identity', () => {
       contractProbe('billing', 'failed', 'billing.openapi.yaml', DOC_B),
     ]
     const diverged = divergedContractProbes(run('before', before), run('after', after))
-    expect(diverged).toEqual([
-      { probeId: 'billing', file: 'billing.openapi.yaml', beforeDigest: DOC_A, afterDigest: DOC_B },
-    ])
+    expect(diverged).toHaveLength(1)
+    expect(diverged[0]).toMatchObject({
+      probeId: 'billing',
+      file: 'billing.openapi.yaml',
+      changedComponents: ['document'],
+      beforeDigest: DOC_A,
+      afterDigest: DOC_B,
+    })
   })
 
   it('a null digest (unreadable document) is not divergence — the probe reports unknown', () => {
     const before = [contractProbe('p', 'passed', 'x.yaml', DOC_A)]
     const after = [contractProbe('p', 'unknown', 'x.yaml', null)]
+    expect(divergedContractProbes(run('before', before), run('after', after))).toEqual([])
+  })
+
+  it.each([
+    {
+      case: 'method changed (GET -> POST)',
+      before: { method: 'GET' as const },
+      after: { method: 'POST' as const },
+      component: 'method',
+    },
+    {
+      case: 'path changed (/users -> /members)',
+      before: { path: '/users' },
+      after: { path: '/members' },
+      component: 'path',
+    },
+    {
+      case: 'expected status changed (200 -> 201)',
+      before: { status: 200 },
+      after: { status: 201 },
+      component: 'status',
+    },
+    {
+      // The strongest case: identical document CONTENT in two different files.
+      // Comparing digests alone would call this comparable; identity must not.
+      case: 'file changed while document digest is identical',
+      before: { file: 'a.openapi.yaml' },
+      after: { file: 'b.openapi.yaml' },
+      component: 'file',
+    },
+  ])('diverges on a complete-identity change: $case', ({ before, after, component }) => {
+    const identity = { method: 'GET' as const, path: '/users', status: 200 }
+    const beforeProbe: ProbeOutcome = {
+      ...contractProbe('p', 'passed', 'users.openapi.yaml', DOC_A),
+      contractIdentity: { file: 'users.openapi.yaml', documentDigest: DOC_A, ...identity, ...before },
+    }
+    const afterProbe: ProbeOutcome = {
+      ...contractProbe('p', 'failed', 'users.openapi.yaml', DOC_A),
+      contractIdentity: { file: 'users.openapi.yaml', documentDigest: DOC_A, ...identity, ...after },
+    }
+    const diverged = divergedContractProbes(run('before', [beforeProbe]), run('after', [afterProbe]))
+    expect(diverged).toHaveLength(1)
+    expect(diverged[0]?.changedComponents).toEqual([component])
+    expect(diverged[0]?.beforeOperation).toBeTruthy()
+    expect(diverged[0]?.afterOperation).toBeTruthy()
+  })
+
+  it('identical identities never diverge even when outcomes differ', () => {
+    const before = [contractProbe('p', 'passed', 'x.yaml', DOC_A)]
+    const after = [contractProbe('p', 'failed', 'x.yaml', DOC_A)]
     expect(divergedContractProbes(run('before', before), run('after', after))).toEqual([])
   })
 
@@ -384,7 +439,17 @@ describe('M5b.1: per-probe contract identity', () => {
     const contribution = probeBaselineStatus({
       transitions: [],
       manifestMode: 'comparable',
-      diverged: [{ probeId: 'billing', file: 'billing.openapi.yaml', beforeDigest: DOC_A, afterDigest: DOC_B }],
+      diverged: [
+        {
+          probeId: 'billing',
+          file: 'billing.openapi.yaml',
+          beforeDigest: DOC_A,
+          afterDigest: DOC_B,
+          changedComponents: ['document'],
+          beforeOperation: 'GET /billing 200 (billing.openapi.yaml)',
+          afterOperation: 'GET /billing 200 (billing.openapi.yaml)',
+        },
+      ],
       runs: [],
     })
     expect(contribution.status).toBe('partial')

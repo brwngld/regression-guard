@@ -442,3 +442,112 @@ describe('M5b.1: mixed expectations are declared-incorrectly (invalid), not abse
     await repo.destroy()
   })
 })
+
+describe('M5b.2: complete contract identity (same document, different operation reference)', () => {
+  const PORT = 47231
+
+  const OPENAPI = `openapi: 3.1.0
+info: { title: demo, version: 1.0.0 }
+paths:
+  /health:
+    get:
+      responses:
+        '200':
+          description: healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+    post:
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [created]
+                properties:
+                  created: { type: boolean }
+`
+
+  const manifestFor = (method: 'GET' | 'POST', status: number) => `version: 1
+services:
+  - name: demo
+    command: node tools/server.mjs
+    readiness: { port: ${PORT}, path: /ready, timeoutMs: 15000 }
+probes:
+  - id: health-contract
+    service: demo
+    request: { method: ${method}, path: /health }
+    expect:
+      fromContract: { file: openapi.yaml, method: ${method}, path: /health, status: ${status} }
+`
+
+  const SERVER = `import { createServer } from 'node:http'
+
+const server = createServer((request, response) => {
+  if (request.url === '/ready') {
+    response.writeHead(204)
+    response.end()
+    return
+  }
+  if (request.url === '/health' && request.method === 'GET') {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ ok: true }))
+    return
+  }
+  if (request.url === '/health' && request.method === 'POST') {
+    response.writeHead(201, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ created: true }))
+    return
+  }
+  response.writeHead(404)
+  response.end('not found')
+})
+
+server.listen(${PORT}, '127.0.0.1')
+`
+
+  it('the SAME document with a CHANGED operation reference diverges that probe (not the document)', async () => {
+    // BEFORE: probe validates GET /health 200. AFTER: same openapi.yaml file,
+    // same document digest — but the probe now validates POST /health 201.
+    // Digest-only comparison would call this comparable; identity must not.
+    const repo = await TempRepo.create({
+      'package.json': JSON.stringify({ name: 'opref-app', version: '1.0.0', type: 'module' }, null, 2),
+      'openapi.yaml': OPENAPI,
+      'regression-guard.services.yaml': manifestFor('GET', 200),
+      'tools/server.mjs': SERVER,
+      'README.md': '# opref\n',
+    })
+    await repo.git('branch', 'base')
+
+    await repo.write({
+      'regression-guard.services.yaml': manifestFor('POST', 201),
+      'README.md': '# opref\n\nchanged\n',
+    })
+    await repo.commit('point the probe at a different operation')
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: 'version: 1\nid: m5b2\ngoal: retarget the probe\npaths:\n  mustChange: ["regression-guard.services.yaml"]\n  mayChange: ["README.md"]\n',
+    })
+
+    // The probe is non-comparable: excluded from attribution, forced partial.
+    expect(report.threeQuestions.regressions.status).toBe('partial')
+    const changed = report.findings.find((finding) => finding.findingClass === 'api-contract-changed')
+    expect(changed).toBeDefined()
+    expect(changed?.message).toContain('health-contract')
+    expect(changed?.message).toContain('method+status')
+    expect(changed?.message).toContain('GET /health 200')
+    expect(changed?.message).toContain('POST /health 201')
+    expect(report.findings.map((finding) => finding.findingClass)).not.toContain('api-contract-regression')
+    expect(report.verdict).toBe('ACCEPT')
+    await repo.destroy()
+  })
+})

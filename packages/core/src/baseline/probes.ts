@@ -124,18 +124,28 @@ function createFindingIdFactory(prefix: 'SPROBE' | 'APROBE' | 'PPROBE' | 'SMAN' 
 }
 
 /**
- * M5b.1: contract comparability is a property of EACH contract-backed probe,
- * never of the service phase as a whole. A divergence is recorded only when
- * the SAME probe id ran contract-sourced on both sides against parsed
- * documents whose digests differ. A null digest (document missing/unparseable)
- * is NOT a divergence — the probe itself reports unknown with details. Probes
- * backed by OTHER documents stay fully comparable.
+ * M5b.1/M5b.2: contract comparability is a property of EACH contract-backed
+ * probe's COMPLETE contract identity, never of the service phase as a whole.
+ * The digest answers "is the referenced document the same content?"; file,
+ * method, path, and status answer "is this the same contract operation?" —
+ * separate facts, both required for comparability. A null digest (document
+ * missing/unparseable) is NOT a divergence — the probe itself reports unknown
+ * with details. Probes backed by other documents stay fully comparable.
  */
 export interface DivergedContract {
   probeId: string
   file: string
-  beforeDigest: string
-  afterDigest: string
+  beforeDigest: string | null
+  afterDigest: string | null
+  /** Which identity components changed, sorted (file | document | method | path | status). */
+  changedComponents: string[]
+  /** Human-readable before/after summary of the operation reference. */
+  beforeOperation: string
+  afterOperation: string
+}
+
+function operationLabel(identity: NonNullable<ProbeOutcome['contractIdentity']>): string {
+  return `${identity.method} ${identity.path} ${identity.status} (${identity.file})`
 }
 
 export function divergedContractProbes(beforeRun: ProbeRunResult, afterRun: ProbeRunResult): DivergedContract[] {
@@ -145,14 +155,26 @@ export function divergedContractProbes(beforeRun: ProbeRunResult, afterRun: Prob
     if (afterProbe.expectation !== 'contract' || afterProbe.contractIdentity === undefined) continue
     const beforeProbe = beforeById.get(afterProbe.probeId)
     if (beforeProbe?.expectation !== 'contract' || beforeProbe.contractIdentity === undefined) continue
-    const beforeDigest = beforeProbe.contractIdentity.documentDigest
-    const afterDigest = afterProbe.contractIdentity.documentDigest
-    if (beforeDigest === null || afterDigest === null || beforeDigest === afterDigest) continue
+    const before = beforeProbe.contractIdentity
+    const after = afterProbe.contractIdentity
+    // A null digest on either side is an unknown, not a divergence.
+    const digestsDiffer = before.documentDigest !== null && after.documentDigest !== null && before.documentDigest !== after.documentDigest
+    const changedComponents = [
+      before.file !== after.file ? 'file' : null,
+      digestsDiffer ? 'document' : null,
+      before.method !== after.method ? 'method' : null,
+      before.path !== after.path ? 'path' : null,
+      before.status !== after.status ? 'status' : null,
+    ].filter((component): component is string => component !== null)
+    if (changedComponents.length === 0) continue
     diverged.push({
       probeId: afterProbe.probeId,
-      file: afterProbe.contractIdentity.file,
-      beforeDigest,
-      afterDigest,
+      file: after.file,
+      beforeDigest: before.documentDigest,
+      afterDigest: after.documentDigest,
+      changedComponents,
+      beforeOperation: operationLabel(before),
+      afterOperation: operationLabel(after),
     })
   }
   return diverged.sort((left, right) => (left.probeId < right.probeId ? -1 : left.probeId > right.probeId ? 1 : 0))
@@ -291,27 +313,28 @@ export function buildProbeFindings(input: ProbeFindingInput): Finding[] {
     })
   }
 
-  // M5b.1: per-probe contract divergence. Only the probes whose OWN referenced
-  // document changed become non-comparable; probes backed by other documents
-  // keep their full transitions above. One finding lists every affected
-  // probe with its file and both digests, so the reader knows exactly which
-  // declared promise changed.
+  // M5b.1/M5b.2: per-probe contract divergence over the COMPLETE identity.
+  // Only the probes whose own contract reference changed become
+  // non-comparable; probes with unchanged identities keep their full
+  // transitions above. The finding names the affected probe, which identity
+  // components changed, and the before/after operation reference, so the
+  // reader knows exactly which declared promise changed and how.
   const diverged = input.diverged ?? []
   if (diverged.length > 0) {
     const entries = diverged.map(
       (entry) =>
-        `"${entry.probeId}" (${entry.file}: ${shortDigest(entry.beforeDigest)} -> ${shortDigest(entry.afterDigest)})`,
+        `"${entry.probeId}" [${entry.changedComponents.join('+')}]: ${entry.beforeOperation} -> ${entry.afterOperation}`,
     )
     findings.push({
       id: nextContractId(),
       findingClass: 'api-contract-changed',
       severity: severityForClass('api-contract-changed'),
-      message: `The referenced API contract changed for ${diverged.length === 1 ? 'probe' : 'probes'} ${entries.join(', ')}; each side was executed against its own recorded contract, so ${diverged.length === 1 ? 'its outcome is' : 'their outcomes are'} of limited comparability.`,
+      message: `The declared contract reference changed for ${diverged.length === 1 ? 'probe' : 'probes'} ${entries.join(', ')}; each side was executed against its own recorded contract, so ${diverged.length === 1 ? 'its outcome is' : 'their outcomes are'} of limited comparability.`,
       paths: [...new Set(diverged.map((entry) => entry.file))].sort(),
       evidence: {
         kind: 'api-contract',
-        claim: 'The after state cannot silently redefine what the API promised: probes whose referenced document changed ran against different promises on each side, so their transitions are excluded from regression attribution.',
-        observation: `${experiment} Contract identity diverged for ${entries.join(', ')}; those probes are reported non-comparable (forced partial) instead of attributed. Probes backed by unchanged documents remain fully comparable.`,
+        claim: 'The after state cannot silently redefine what the API promised: probes whose contract identity (document, operation, or expected status) changed ran against different promises on each side, so their transitions are excluded from regression attribution.',
+        observation: `${experiment} Contract identity diverged for ${entries.join(', ')}; those probes are reported non-comparable (forced partial) instead of attributed. Probes with unchanged contract identities remain fully comparable.`,
         changedLines: [],
         reproduction: `inspect the OpenAPI document(s) referenced by ${SERVICE_MANIFEST_FILE} at both compared states`,
       },
