@@ -64,7 +64,15 @@ export type FindingClass = z.infer<typeof FindingClassSchema>
 export const PolicyActionSchema = z.enum(['accept', 'warn', 'review', 'reject'])
 export type PolicyAction = z.infer<typeof PolicyActionSchema>
 
-export const ContractPathsSchema = z.object({
+/**
+ * STRICT by design (found in adversarial verification): a misplaced contract
+ * key must fail loudly, never silently vanish. The motivating case —
+ * `prohibited:` written at the top level instead of under `paths:` — parsed
+ * as a valid contract with NO prohibitions, so the tool honestly verified
+ * against rules the author believed they had declared. Declared-incorrectly
+ * is an error, exactly like an invalid service manifest.
+ */
+export const ContractPathsSchema = z.strictObject({
   mustChange: z.array(PathRuleSchema).default([]),
   mayChange: z.array(PathRuleSchema).default([]),
   mustPreserve: z.array(PathRuleSchema).default([]),
@@ -74,7 +82,7 @@ export const ContractPathsSchema = z.object({
 /** Contracts carry an explicit schema version so future format changes are detectable. */
 export const CONTRACT_SCHEMA_VERSION = 1
 
-export const ChangeContractSchema = z.object({
+export const ChangeContractSchema = z.strictObject({
   /** Defaults to 1 so contracts written before versioning still parse. */
   version: z.literal(CONTRACT_SCHEMA_VERSION).default(CONTRACT_SCHEMA_VERSION),
   id: z.string().min(1),
@@ -107,13 +115,28 @@ export class ContractValidationError extends Error {
   }
 }
 
+const PATH_RULE_KEYS = ['mustChange', 'mayChange', 'mustPreserve', 'prohibited'] as const
+
+/**
+ * Upgrade unrecognized-key issues into pointed guidance when the misplaced
+ * key is a path rule — the single most likely authoring mistake, and the one
+ * with the worst silent failure mode when it slips through.
+ */
+function describeIssue(issue: { path: PropertyKey[]; message: string }): string {
+  const where = issue.path.join('.') || '(root)'
+  const misplaced = PATH_RULE_KEYS.filter((key) => issue.message.includes(`"${key}"`) || issue.message.includes(key))
+  if (issue.path.length === 0 && misplaced.length > 0) {
+    const names = `"${misplaced.join('", "')}"`
+    return `${where}: ${names} ${misplaced.length === 1 ? 'is a path rule and belongs' : 'are path rules and belong'} under 'paths:' — a top-level path rule would otherwise be silently ignored, which this schema refuses`
+  }
+  return `${where}: ${issue.message}`
+}
+
 /** Parse a contract from a parsed YAML/JSON value with a helpful error. */
 export function parseContract(input: unknown): ChangeContract {
   const result = ChangeContractSchema.safeParse(input)
   if (!result.success) {
-    const issues = result.error.issues.map(
-      (issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`,
-    )
+    const issues = result.error.issues.map(describeIssue)
     throw new ContractValidationError(`Invalid change contract:\n  - ${issues.join('\n  - ')}`, issues)
   }
   return result.data

@@ -107,7 +107,11 @@ export const ProbeDeclarationSchema = z.object({
 })
 export type ProbeDeclaration = z.infer<typeof ProbeDeclarationSchema>
 
-export const ServiceManifestSchema = z.object({
+/**
+ * STRICT (same rationale as the change contract): a misplaced manifest key
+ * fails loudly instead of silently narrowing what verification was declared.
+ */
+export const ServiceManifestSchema = z.strictObject({
   version: z.literal(1).default(1),
   services: z.array(ServiceDeclarationSchema).min(1),
   probes: z.array(ProbeDeclarationSchema).default([]),

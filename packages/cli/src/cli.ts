@@ -104,7 +104,15 @@ program
 
       let contractText: string
       try {
-        contractText = await readFile(path.resolve(options.contract), 'utf8')
+        // Relative --contract resolves against the process cwd first, then
+        // falls back to the repository root (--cwd): contracts live in the
+        // repo they govern, but the CLI is often invoked from elsewhere.
+        const primary = path.resolve(options.contract)
+        const contractPath =
+          existsSync(primary) || path.isAbsolute(options.contract)
+            ? primary
+            : path.resolve(options.cwd, options.contract)
+        contractText = await readFile(contractPath, 'utf8')
       } catch (cause) {
         program.error(`Cannot read contract file: ${options.contract}`)
         throw cause
