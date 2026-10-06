@@ -245,7 +245,7 @@ export {
   compareManifests,
   probeTransitions,
   buildProbeFindings,
-  apiContractsDiverged,
+  divergedContractProbes,
   buildManifestInvalidFinding,
   probeBaselineStatus,
 } from './baseline/probes'

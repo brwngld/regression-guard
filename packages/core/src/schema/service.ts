@@ -48,21 +48,49 @@ export const ContractRefSchema = z.object({
 })
 export type ContractRef = z.infer<typeof ContractRefSchema>
 
-export const ProbeExpectationSchema = z.object({
-  /** Expected HTTP status code. */
-  status: z.number().int().optional(),
-  /** Substring the response body must contain. */
-  bodyContains: z.string().optional(),
-  /**
-   * When present, expectations are sourced from the referenced OpenAPI
-   * operation (status + declared JSON schema, validated against the PINNED
-   * subset). Takes precedence over inline status/bodyContains when both are
-   * given. Unresolvable refs / missing operations / unsupported schema
-   * constructs yield UNKNOWN, never silent passes.
-   */
-  fromContract: ContractRefSchema.optional(),
-})
+export const ProbeExpectationSchema = z
+  .object({
+    /** Expected HTTP status code. */
+    status: z.number().int().optional(),
+    /** Substring the response body must contain. */
+    bodyContains: z.string().optional(),
+    /**
+     * When present, expectations are sourced from the referenced OpenAPI
+     * operation (status + declared JSON schema, validated against the PINNED
+     * subset). MUTUALLY EXCLUSIVE with inline status/bodyContains (M5b.1):
+     * configuration that looks like all assertions matter while two silently
+     * don't is exactly the hidden precedence this engine refuses. Unresolvable
+     * refs / missing operations / unsupported schema constructs yield
+     * UNKNOWN, never silent passes.
+     */
+    fromContract: ContractRefSchema.optional(),
+  })
+  .refine(
+    (expectation) =>
+      expectation.fromContract === undefined ||
+      (expectation.status === undefined && expectation.bodyContains === undefined),
+    {
+      message:
+        'expect must be EITHER inline (status/bodyContains) OR fromContract — not both; inline fields next to a contract ref would be silently ignored',
+    },
+  )
 export type ProbeExpectation = z.infer<typeof ProbeExpectationSchema>
+
+/**
+ * Per-probe contract identity (M5b.1): comparability is a property of EACH
+ * contract-backed probe, not the service phase as a whole. A change to one
+ * API document must never make probes backed by other documents appear
+ * non-comparable. `documentDigest` is null when the referenced document
+ * could not be read/parsed (the outcome itself is unknown with detail).
+ */
+export const ContractIdentitySchema = z.object({
+  file: z.string(),
+  documentDigest: z.string().nullable(),
+  method: ContractRefSchema.shape.method,
+  path: z.string(),
+  status: z.number().int(),
+})
+export type ContractIdentity = z.infer<typeof ContractIdentitySchema>
 
 export const ProbeDeclarationSchema = z.object({
   /** Stable probe identity used for before/after matching (like a test id). */
@@ -94,6 +122,8 @@ export const ProbeOutcomeSchema = z.object({
   status: z.enum(['passed', 'failed', 'unknown']),
   /** Which kind of expectation produced this outcome — routes the finding class on regression. */
   expectation: z.enum(['inline', 'contract']).default('inline'),
+  /** Present on contract-sourced probes: the per-probe contract identity (M5b.1 — the authoritative comparability unit). */
+  contractIdentity: ContractIdentitySchema.optional(),
   httpStatus: z.number().int().nullable(),
   durationMs: z.number().int(),
   detail: z.string().optional(),

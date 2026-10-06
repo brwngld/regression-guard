@@ -8,7 +8,7 @@ import type {
 } from '../schema/service'
 import { startProcess, type RunningProcess } from '../exec/run'
 import { evaluateProbe } from './probe-eval'
-import { checkAgainstSchema, parseOpenApiDocument, resolveContractExpectation } from './contract'
+import { apiContractDigest, checkAgainstSchema, parseOpenApiDocument, resolveContractExpectation } from './contract'
 
 /**
  * M5 service verification runtime: boot each needed service inside an
@@ -226,17 +226,27 @@ async function executeContractProbe(
     service: probe.service,
     expectation: 'contract' as const,
   }
+  // M5b.1: every contract-probe outcome carries its per-probe identity —
+  // digest null when the document could not be read/parsed (unknown detail).
+  const identityOf = (digest: string | null) => ({
+    file: ref.file,
+    documentDigest: digest,
+    method: ref.method,
+    path: ref.path,
+    status: ref.status,
+  })
 
   const docText = await readFile(join(cwd, ref.file), 'utf8').catch(() => null)
   const doc = parseOpenApiDocument(docText)
   if (doc === null) {
-    return { ...base, status: 'unknown', httpStatus: null, durationMs: Date.now() - startedAt, detail: `contract document "${ref.file}" missing or unparseable` }
+    return { ...base, status: 'unknown', contractIdentity: identityOf(null), httpStatus: null, durationMs: Date.now() - startedAt, detail: `contract document "${ref.file}" missing or unparseable` }
   }
   const resolution = resolveContractExpectation(doc, ref)
   if (resolution.status === 'unresolvable') {
-    return { ...base, status: 'unknown', httpStatus: null, durationMs: Date.now() - startedAt, detail: resolution.reason }
+    return { ...base, status: 'unknown', contractIdentity: identityOf(apiContractDigest(doc)), httpStatus: null, durationMs: Date.now() - startedAt, detail: resolution.reason }
   }
   const expectation = resolution.expectation
+  const identity = identityOf(apiContractDigest(doc))
 
   const url = `http://127.0.0.1:${service.readiness.port}${probe.request.path}`
   const method = probe.request.method
@@ -251,6 +261,7 @@ async function executeContractProbe(
       return {
         ...base,
         status: 'failed',
+        contractIdentity: identity,
         httpStatus: response.status,
         durationMs: Date.now() - startedAt,
         detail: `expected status ${expectation.status}, got ${response.status}`,
@@ -258,7 +269,7 @@ async function executeContractProbe(
     }
     if (expectation.schema === undefined) {
       // Status-only contract: the declaration asked nothing about the body.
-      return { ...base, status: 'passed', httpStatus: response.status, durationMs: Date.now() - startedAt }
+      return { ...base, status: 'passed', contractIdentity: identity, httpStatus: response.status, durationMs: Date.now() - startedAt }
     }
     const body = method === 'HEAD' ? '' : await response.text()
     let parsed: unknown
@@ -268,6 +279,7 @@ async function executeContractProbe(
       return {
         ...base,
         status: 'failed',
+        contractIdentity: identity,
         httpStatus: response.status,
         durationMs: Date.now() - startedAt,
         detail: 'response body is not valid JSON',
@@ -275,12 +287,13 @@ async function executeContractProbe(
     }
     const check = checkAgainstSchema(parsed, expectation.schema)
     if (check.verdict === 'valid') {
-      return { ...base, status: 'passed', httpStatus: response.status, durationMs: Date.now() - startedAt }
+      return { ...base, status: 'passed', contractIdentity: identity, httpStatus: response.status, durationMs: Date.now() - startedAt }
     }
     if (check.verdict === 'invalid') {
       return {
         ...base,
         status: 'failed',
+        contractIdentity: identity,
         httpStatus: response.status,
         durationMs: Date.now() - startedAt,
         detail: check.reason,
@@ -289,6 +302,7 @@ async function executeContractProbe(
     return {
       ...base,
       status: 'unknown',
+      contractIdentity: identity,
       httpStatus: response.status,
       durationMs: Date.now() - startedAt,
       detail: `unsupported schema construct: ${check.keyword}`,
@@ -297,6 +311,7 @@ async function executeContractProbe(
     return {
       ...base,
       status: 'unknown',
+      contractIdentity: identity,
       httpStatus: null,
       durationMs: Date.now() - startedAt,
       detail: networkErrorDetail(error, probe.timeoutMs),

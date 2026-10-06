@@ -16,11 +16,12 @@ import type {
 import {
   INVALID_MANIFEST_DIGEST,
   SERVICE_MANIFEST_FILE,
+  type ProbeOutcome,
   type ProbeRunResult,
   type ServiceManifest,
 } from '../schema/service'
 import { loadServiceManifest } from '../service/manifest'
-import { apiContractDigest, parseOpenApiDocument } from '../service/contract'
+
 import { runServiceProbes } from '../service/runtime'
 import { canonicalJson } from '../reproduction/identity'
 import type { GitAdapter } from '../vcs/git'
@@ -33,7 +34,7 @@ import {
 import { parseRunnerJson } from './parse'
 import { classifyPerTest, classifySuite, summarize, suiteStatusOf, type SuiteStatus } from './compare'
 import {
-  apiContractsDiverged,
+  divergedContractProbes,
   buildManifestInvalidFinding,
   buildProbeFindings,
   compareManifests,
@@ -230,40 +231,6 @@ async function readManifestSide(worktreeDir: string): Promise<ManifestSideState>
   return result.status === 'invalid' ? { status: 'invalid', errors: result.errors } : { status: 'absent' }
 }
 
-/**
- * Per-side API-contract identity (M5b): the DISTINCT sorted OpenAPI files the
- * side's contract probes reference, each parsed from its worktree (the
- * recorded state) and reduced to its `apiContractDigest`; the side digest is a
- * manifestDigest-style hash over that sorted list ('oasl_…'). Any referenced
- * document missing or unparseable -> null (the probes themselves report
- * unknown with details — no identity is invented); sides whose probes
- * reference no contract carry null.
- */
-async function contractDigestForSide(
-  worktreeDir: string,
-  manifest: ServiceManifest,
-): Promise<string | null> {
-  const files = [
-    ...new Set(
-      manifest.probes.flatMap((probe) =>
-        probe.expect.fromContract === undefined ? [] : [probe.expect.fromContract.file],
-      ),
-    ),
-  ].sort()
-  if (files.length === 0) {
-    return null
-  }
-  const digests: string[] = []
-  for (const file of files) {
-    const text = await readFile(join(worktreeDir, file), 'utf8').catch(() => null)
-    const doc = parseOpenApiDocument(text)
-    if (doc === null) {
-      return null
-    }
-    digests.push(apiContractDigest(doc))
-  }
-  return `oasl_${createHash('sha256').update(canonicalJson(digests), 'utf8').digest('hex')}`
-}
 
 interface ServicePhaseInput {
   beforeDir: string
@@ -315,12 +282,16 @@ async function runServicePhase(input: ServicePhaseInput): Promise<ServicePhaseRe
 
   const transitions = probeTransitions(beforeRun.probes, afterRun.probes)
   const summary = summarize(transitions)
-  const findings = buildProbeFindings({ beforeRun, afterRun, transitions, summary })
+  // M5b.1: divergence is per-probe (same probe id, contract-sourced on both
+  // sides, differing document digests). Diverged probes are excluded from
+  // attribution in buildProbeFindings and force partial here.
+  const diverged = divergedContractProbes(beforeRun, afterRun)
+  const findings = buildProbeFindings({ beforeRun, afterRun, transitions, summary, diverged })
   const status = probeBaselineStatus({
     transitions,
     summary,
     manifestMode,
-    contractDigestsDiverged: apiContractsDiverged(beforeRun, afterRun),
+    diverged,
     runs: [beforeRun, afterRun],
   })
   return { before: beforeRun, after: afterRun, manifestMode, transitions, summary, findings, status }
@@ -383,16 +354,33 @@ async function runOneProbeSide(
     return emptyProbeRun(label, ref, side)
   }
   const phase = await runServiceProbes({ cwd: worktreeDir, manifest: side.manifest })
-  const contractDigest = await contractDigestForSide(worktreeDir, side.manifest)
   return {
     label,
     ref,
     manifestDigest: side.digest,
-    contractDigest,
+    // M5b.1: DISPLAY-ONLY aggregate over the per-probe identities the runtime
+    // stamped (sorted unique document digests). Comparability is authoritative
+    // per probe via contractIdentity on each outcome — never this aggregate.
+    contractDigest: aggregateContractDigest(phase.probes),
     servicesReady: phase.servicesReady,
     probes: phase.probes,
     durationMs: phase.durationMs,
   }
+}
+
+/** Sorted-unique document digests from a side's contract-probe identities; null when none. */
+function aggregateContractDigest(probes: ProbeOutcome[]): string | null {
+  const digests = [
+    ...new Set(
+      probes
+        .filter((probe) => probe.contractIdentity?.documentDigest != null)
+        .map((probe) => probe.contractIdentity!.documentDigest),
+    ),
+  ].sort()
+  if (digests.length === 0) {
+    return null
+  }
+  return `oasl_${createHash('sha256').update(canonicalJson(digests), 'utf8').digest('hex')}`
 }
 
 interface SuiteExecution {

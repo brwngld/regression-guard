@@ -104,6 +104,14 @@ export interface ProbeFindingInput {
   afterRun: ProbeRunResult
   transitions: TestTransition[]
   summary: BaselineSummary
+  /**
+   * M5b.1: per-probe contract divergence (from divergedContractProbes).
+   * Diverged probes are EXCLUDED from regression/pre-existing attribution —
+   * each side ran under a different promise, so a transition between them
+   * cannot be attributed to the change. They surface via api-contract-changed
+   * and force partial instead.
+   */
+  diverged?: DivergedContract[]
 }
 
 /** Per-report identifier counter: unique within one verification run. */
@@ -116,22 +124,38 @@ function createFindingIdFactory(prefix: 'SPROBE' | 'APROBE' | 'PPROBE' | 'SMAN' 
 }
 
 /**
- * True when both sides ran contract probes AND their recorded API-contract
- * digests differ: each side was executed against its own OpenAPI document, so
- * contract-probe outcomes are of limited comparability. A null digest (no
- * contract referenced, or a referenced document missing/unparseable) is NOT a
- * divergence — the probes themselves report unknown with details.
+ * M5b.1: contract comparability is a property of EACH contract-backed probe,
+ * never of the service phase as a whole. A divergence is recorded only when
+ * the SAME probe id ran contract-sourced on both sides against parsed
+ * documents whose digests differ. A null digest (document missing/unparseable)
+ * is NOT a divergence — the probe itself reports unknown with details. Probes
+ * backed by OTHER documents stay fully comparable.
  */
-export function apiContractsDiverged(beforeRun: ProbeRunResult, afterRun: ProbeRunResult): boolean {
-  const hasContractProbes = (run: ProbeRunResult) =>
-    run.probes.some((probe) => probe.expectation === 'contract')
-  return (
-    hasContractProbes(beforeRun) &&
-    hasContractProbes(afterRun) &&
-    beforeRun.contractDigest !== null &&
-    afterRun.contractDigest !== null &&
-    beforeRun.contractDigest !== afterRun.contractDigest
-  )
+export interface DivergedContract {
+  probeId: string
+  file: string
+  beforeDigest: string
+  afterDigest: string
+}
+
+export function divergedContractProbes(beforeRun: ProbeRunResult, afterRun: ProbeRunResult): DivergedContract[] {
+  const beforeById = new Map(beforeRun.probes.map((probe) => [probe.probeId, probe]))
+  const diverged: DivergedContract[] = []
+  for (const afterProbe of afterRun.probes) {
+    if (afterProbe.expectation !== 'contract' || afterProbe.contractIdentity === undefined) continue
+    const beforeProbe = beforeById.get(afterProbe.probeId)
+    if (beforeProbe?.expectation !== 'contract' || beforeProbe.contractIdentity === undefined) continue
+    const beforeDigest = beforeProbe.contractIdentity.documentDigest
+    const afterDigest = afterProbe.contractIdentity.documentDigest
+    if (beforeDigest === null || afterDigest === null || beforeDigest === afterDigest) continue
+    diverged.push({
+      probeId: afterProbe.probeId,
+      file: afterProbe.contractIdentity.file,
+      beforeDigest,
+      afterDigest,
+    })
+  }
+  return diverged.sort((left, right) => (left.probeId < right.probeId ? -1 : left.probeId > right.probeId ? 1 : 0))
 }
 
 /**
@@ -163,7 +187,14 @@ export function buildProbeFindings(input: ProbeFindingInput): Finding[] {
 
   const experiment = `Experiment: ran the declared service probes against ${beforeRun.ref} and ${afterRun.ref} in isolated worktrees.`
 
-  const ordered = [...input.transitions].sort((left, right) => compareStrings(left.id, right.id))
+  // M5b.1: diverged-contract probes are excluded from regression/pre-existing
+  // attribution — each side ran under a different promise, so a transition
+  // between them cannot be attributed to the change. They surface via
+  // api-contract-changed and force partial instead.
+  const divergedIds = new Set((input.diverged ?? []).map((entry) => entry.probeId))
+  const ordered = [...input.transitions]
+    .filter((transition) => !divergedIds.has(transition.id))
+    .sort((left, right) => compareStrings(left.id, right.id))
 
   for (const transition of ordered) {
     if (transition.kind !== 'regression') {
@@ -260,19 +291,27 @@ export function buildProbeFindings(input: ProbeFindingInput): Finding[] {
     })
   }
 
-  if (apiContractsDiverged(beforeRun, afterRun)) {
-    const beforeShort = shortDigest(beforeRun.contractDigest ?? '')
-    const afterShort = shortDigest(afterRun.contractDigest ?? '')
+  // M5b.1: per-probe contract divergence. Only the probes whose OWN referenced
+  // document changed become non-comparable; probes backed by other documents
+  // keep their full transitions above. One finding lists every affected
+  // probe with its file and both digests, so the reader knows exactly which
+  // declared promise changed.
+  const diverged = input.diverged ?? []
+  if (diverged.length > 0) {
+    const entries = diverged.map(
+      (entry) =>
+        `"${entry.probeId}" (${entry.file}: ${shortDigest(entry.beforeDigest)} -> ${shortDigest(entry.afterDigest)})`,
+    )
     findings.push({
       id: nextContractId(),
       findingClass: 'api-contract-changed',
       severity: severityForClass('api-contract-changed'),
-      message: `The referenced API contract is not the same on both sides: before: ${beforeShort} -> after: ${afterShort}.`,
-      paths: [SERVICE_MANIFEST_FILE],
+      message: `The referenced API contract changed for ${diverged.length === 1 ? 'probe' : 'probes'} ${entries.join(', ')}; each side was executed against its own recorded contract, so ${diverged.length === 1 ? 'its outcome is' : 'their outcomes are'} of limited comparability.`,
+      paths: [...new Set(diverged.map((entry) => entry.file))].sort(),
       evidence: {
         kind: 'api-contract',
-        claim: 'The after state cannot silently redefine what the API promised: each side was executed against its own recorded OpenAPI document, so the contract-probe outcomes are of limited comparability.',
-        observation: `${experiment} Each side executed its contract probes against its own recorded OpenAPI document (before ${beforeShort} -> after ${afterShort}), so contract-probe comparability is limited and the probe verdict is forced partial.`,
+        claim: 'The after state cannot silently redefine what the API promised: probes whose referenced document changed ran against different promises on each side, so their transitions are excluded from regression attribution.',
+        observation: `${experiment} Contract identity diverged for ${entries.join(', ')}; those probes are reported non-comparable (forced partial) instead of attributed. Probes backed by unchanged documents remain fully comparable.`,
         changedLines: [],
         reproduction: `inspect the OpenAPI document(s) referenced by ${SERVICE_MANIFEST_FILE} at both compared states`,
       },
@@ -324,11 +363,12 @@ export interface ProbeStatusInput {
   /** Manifest comparability mode (from `compareManifests`). */
   manifestMode: ManifestComparison['mode']
   /**
-   * True when both sides ran contract probes against differing recorded
-   * API-contract digests (from `apiContractsDiverged`) — contract-probe
-   * comparability is limited, so the contribution is forced partial.
+   * M5b.1: per-probe contract divergence (from `divergedContractProbes`).
+   * Affected probes ran under different promises on each side; their
+   * comparability is limited, so the contribution is forced partial with one
+   * reason naming each affected probe.
    */
-  contractDigestsDiverged?: boolean
+  diverged?: DivergedContract[]
   /**
    * True when a side DECLARED a manifest that could not be loaded
    * (`loadServiceManifest` invalid): its probes did not execute. Subsumes the
@@ -393,9 +433,10 @@ export function probeBaselineStatus(input: ProbeStatusInput): ProbeStatusContrib
       'the service manifest changed between the compared states, so the before and after probe runs are not directly comparable',
     )
   }
-  if (input.contractDigestsDiverged) {
+  if ((input.diverged ?? []).length > 0) {
+    const names = (input.diverged ?? []).map((entry) => `"${entry.probeId}" (${entry.file})`).join(', ')
     incompleteReasons.push(
-      'the referenced API contract differs between the compared states, so contract-probe outcomes are of limited comparability',
+      `the referenced API contract changed for probe(s) ${names}, so their outcomes are of limited comparability`,
     )
   }
 

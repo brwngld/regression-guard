@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { loadServiceManifest, manifestDigest, parseServiceManifest } from './manifest'
+import { ServiceManifestSchema } from '../schema/service'
 
 const VALID_MINIMAL = `
 services:
@@ -213,5 +214,57 @@ describe('manifestDigest', () => {
     const changed = parseServiceManifest(other)
     expect(changed).not.toBeNull()
     expect(manifestDigest(changed!)).not.toBe(base)
+  })
+})
+
+describe('M5b.1: inline XOR contract-sourced expectations', () => {
+  it.each([
+    {case: 'inline-only expectation is valid', expectation: { status: 200, bodyContains: 'ok' } },
+    {case: 'contract-only expectation is valid', expectation: { fromContract: { file: 'openapi.yaml', method: 'GET', path: '/x', status: 200 } } },
+    {case: 'empty expectation is valid (vacuous)', expectation: {} },
+  ])('$case', ({ expectation }) => {
+    const manifest = ServiceManifestSchema.safeParse({
+      version: 1,
+      services: [{ name: 'api', command: 'node server.js', readiness: { port: 8080 } }],
+      probes: [{ id: 'p', service: 'api', request: {}, expect: expectation }],
+    })
+    expect(manifest.success).toBe(true)
+  })
+
+  it.each([
+    {case: 'fromContract plus inline status', expectation: { status: 200, fromContract: { file: 'o.yaml', method: 'GET', path: '/x', status: 200 } } },
+    {case: 'fromContract plus inline bodyContains', expectation: { bodyContains: 'hi', fromContract: { file: 'o.yaml', method: 'GET', path: '/x', status: 200 } } },
+  ])('rejects mixed expectation: $case', ({ expectation }) => {
+    const manifest = ServiceManifestSchema.safeParse({
+      version: 1,
+      services: [{ name: 'api', command: 'node server.js', readiness: { port: 8080 } }],
+      probes: [{ id: 'p', service: 'api', request: {}, expect: expectation }],
+    })
+    expect(manifest.success).toBe(false)
+    if (!manifest.success) {
+      expect(manifest.error.issues[0]?.message).toContain('EITHER inline')
+    }
+  })
+
+  it('a manifest with a mixed expectation loads as INVALID (declared incorrectly), not absent', () => {
+    const yaml = [
+      'version: 1',
+      'services:',
+      '  - name: api',
+      '    command: node server.js',
+      '    readiness: { port: 8080 }',
+      'probes:',
+      '  - id: p',
+      '    service: api',
+      '    request: { path: /x }',
+      '    expect:',
+      '      status: 200',
+      '      fromContract: { file: o.yaml, method: GET, path: /x, status: 200 }',
+    ].join('\n')
+    const result = loadServiceManifest(yaml)
+    expect(result.status).toBe('invalid')
+    if (result.status === 'invalid') {
+      expect(result.errors.some((error) => error.includes('EITHER inline'))).toBe(true)
+    }
   })
 })

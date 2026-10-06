@@ -245,3 +245,200 @@ describe('M5b: API contract verification scenarios', () => {
     await repo.destroy()
   })
 })
+
+describe('M5b.1: per-probe contract identity (two documents, only one changes)', () => {
+  const PORT = 47230
+
+  const usersApi = (extra = '') => `openapi: 3.1.0
+info: { title: users, version: 1.0.0 }
+paths:
+  /users:
+    get:
+      responses:
+        '200':
+          description: list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total]
+                properties:
+                  total: { type: integer }${extra}
+`
+
+  const billingApi = (extra = '') => `openapi: 3.1.0
+info: { title: billing, version: 1.0.0 }
+paths:
+  /billing:
+    get:
+      responses:
+        '200':
+          description: balance
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [balance]
+                properties:
+                  balance: { type: integer }${extra}
+`
+
+  const MANIFEST = `version: 1
+services:
+  - name: demo
+    command: node tools/server.mjs
+    readiness: { port: ${PORT}, path: /ready, timeoutMs: 15000 }
+probes:
+  - id: users-contract
+    service: demo
+    request: { method: GET, path: /users }
+    expect:
+      fromContract: { file: users.openapi.yaml, method: GET, path: /users, status: 200 }
+  - id: billing-contract
+    service: demo
+    request: { method: GET, path: /billing }
+    expect:
+      fromContract: { file: billing.openapi.yaml, method: GET, path: /billing, status: 200 }
+`
+
+  const SERVER = `import { createServer } from 'node:http'
+
+const server = createServer((request, response) => {
+  if (request.url === '/ready') {
+    response.writeHead(204)
+    response.end()
+    return
+  }
+  if (request.url === '/users') {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ total: 3 }))
+    return
+  }
+  if (request.url === '/billing') {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ balance: 10 }))
+    return
+  }
+  response.writeHead(404)
+  response.end('not found')
+})
+
+server.listen(${PORT}, '127.0.0.1')
+`
+
+  function twoDocRepo(): Record<string, string> {
+    return {
+      'package.json': JSON.stringify({ name: 'twodoc-app', version: '1.0.0', type: 'module' }, null, 2),
+      'users.openapi.yaml': usersApi(),
+      'billing.openapi.yaml': billingApi(),
+      'regression-guard.services.yaml': MANIFEST,
+      'tools/server.mjs': SERVER,
+      'README.md': '# twodoc\n',
+    }
+  }
+
+  it('only the probe whose document changed becomes non-comparable; the other stays attributable', async () => {
+    const repo = await TempRepo.create(twoDocRepo())
+    await repo.git('branch', 'base')
+
+    // Change ONLY the billing contract (declare a stricter promise); the
+    // server satisfies both old and new billing specs, and the users spec is
+    // untouched — so users must remain fully comparable and attributable.
+    await repo.write({
+      'billing.openapi.yaml': billingApi('\n                  currency: { type: string }'),
+      'README.md': '# twodoc\n\nchanged\n',
+    })
+    await repo.commit('tighten the billing contract')
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: 'version: 1\nid: m5b1\ngoal: tighten billing\npaths:\n  mustChange: ["billing.openapi.yaml"]\n  mayChange: ["README.md"]\n',
+    })
+
+    // The users probe ran comparable on both sides (PASS -> PASS preserved).
+    const usersBefore = report.baseline?.probes?.before.probes.find((probe) => probe.probeId === 'users-contract')
+    const usersAfter = report.baseline?.probes?.after.probes.find((probe) => probe.probeId === 'users-contract')
+    expect(usersAfter?.contractIdentity?.file).toBe('users.openapi.yaml')
+    expect(usersAfter?.status).toBe('passed')
+
+    // Only billing diverged; the finding names the probe and its document.
+    const changed = report.findings.find((finding) => finding.findingClass === 'api-contract-changed')
+    expect(changed).toBeDefined()
+    expect(changed?.message).toContain('billing-contract')
+    expect(changed?.message).toContain('billing.openapi.yaml')
+    expect(changed?.message).not.toContain('users-contract')
+    expect(changed?.paths).toEqual(['billing.openapi.yaml'])
+
+    // Forced partial, never pass; scope-clean change stays ACCEPT.
+    expect(report.threeQuestions.regressions.status).toBe('partial')
+    expect(report.verdict).toBe('ACCEPT')
+
+    // Diverged probes are excluded from attribution: no api-contract-regression
+    // for billing even though its transition table entry exists.
+    expect(report.findings.map((finding) => finding.findingClass)).not.toContain('api-contract-regression')
+    await repo.destroy()
+  })
+
+  it('a comparable probe regression alongside a diverged document stays attributable', async () => {
+    const repo = await TempRepo.create(twoDocRepo())
+    await repo.git('branch', 'base')
+
+    // Billing contract changes AND the users endpoint genuinely breaks —
+    // users is fully comparable, so its regression must still be attributed.
+    await repo.write({
+      'billing.openapi.yaml': billingApi('\n                  currency: { type: string }'),
+      'tools/server.mjs': SERVER.replace(
+        "response.end(JSON.stringify({ total: 3 }))",
+        "response.end(JSON.stringify({ total: 'three' }))",
+      ),
+    })
+    await repo.commit('tighten billing, break users')
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: 'version: 1\nid: m5b1b\ngoal: mixed outcomes\npaths:\n  mustChange: ["billing.openapi.yaml"]\n  mayChange: ["tools/**"]\n',
+    })
+
+    // The users regression is attributed (its document never changed).
+    const regression = report.findings.find((finding) => finding.findingClass === 'api-contract-regression')
+    expect(regression?.message).toContain('users-contract')
+    expect(regression?.evidence.observation).toContain('expected integer')
+    // Billing divergence is still reported separately.
+    const changed = report.findings.find((finding) => finding.findingClass === 'api-contract-changed')
+    expect(changed?.message).toContain('billing-contract')
+    expect(report.verdict).toBe('REJECT')
+    await repo.destroy()
+  })
+})
+
+describe('M5b.1: mixed expectations are declared-incorrectly (invalid), not absent', () => {
+  it('rejects a manifest mixing inline and contract expectations with the explicit finding', async () => {
+    const files = contractRepo(HEALTHY)
+    files['regression-guard.services.yaml'] = MANIFEST.replace(
+      '    expect:\n      fromContract: { file: openapi.yaml, method: GET, path: /health, status: 200 }',
+      '    expect:\n      status: 200\n      fromContract: { file: openapi.yaml, method: GET, path: /health, status: 200 }',
+    )
+    const repo = await TempRepo.create(files)
+    await repo.git('branch', 'base')
+    await repo.write({ 'README.md': '# contract-app\n\nchanged\n' })
+    await repo.commit('innocent change')
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      after: 'HEAD',
+      contract: contract('README.md'),
+    })
+
+    expect(report.threeQuestions.regressions.status).toBe('partial')
+    const invalid = report.findings.find((finding) => finding.findingClass === 'service-manifest-invalid')
+    expect(invalid).toBeDefined()
+    expect(invalid?.severity).toBe('info')
+    expect(report.baseline?.probes?.before.probes).toEqual([])
+    await repo.destroy()
+  })
+})

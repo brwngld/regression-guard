@@ -3,6 +3,7 @@ import { summarize } from './compare'
 import {
   buildProbeFindings,
   compareManifests,
+  divergedContractProbes,
   probeBaselineStatus,
   probeTransitions,
   type ManifestSide,
@@ -53,8 +54,31 @@ const findingsFor = (
   const beforeRun = run('before', beforeProbes, { manifestDigest: manifest.before ?? DIGEST_A })
   const afterRun = run('after', afterProbes, { manifestDigest: manifest.after ?? DIGEST_A })
   const transitions = probeTransitions(beforeProbes, afterProbes)
-  return buildProbeFindings({ beforeRun, afterRun, transitions, summary: summarize(transitions) })
+  return buildProbeFindings({
+    beforeRun,
+    afterRun,
+    transitions,
+    summary: summarize(transitions),
+    diverged: divergedContractProbes(beforeRun, afterRun),
+  })
 }
+
+const contractProbe = (
+  probeId: string,
+  status: ProbeOutcome['status'],
+  file: string,
+  digest: string | null,
+): ProbeOutcome => ({
+  ...probe(probeId, status),
+  expectation: 'contract',
+  contractIdentity: {
+    file,
+    documentDigest: digest,
+    method: 'GET',
+    path: '/x',
+    status: 200,
+  },
+})
 
 describe('probeTransitions', () => {
   type Row = {
@@ -304,5 +328,68 @@ describe('probeBaselineStatus', () => {
       status: 'pass',
       incompleteReasons: [],
     })
+  })
+})
+
+describe('M5b.1: per-probe contract identity', () => {
+  const DOC_A = 'oas_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0'
+  const DOC_B = 'oas_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0'
+
+  it('diverges only the probe whose own document changed; other documents stay comparable', () => {
+    const before = [
+      contractProbe('users', 'passed', 'users.openapi.yaml', DOC_A),
+      contractProbe('billing', 'passed', 'billing.openapi.yaml', DOC_A),
+    ]
+    const after = [
+      contractProbe('users', 'passed', 'users.openapi.yaml', DOC_A),
+      contractProbe('billing', 'failed', 'billing.openapi.yaml', DOC_B),
+    ]
+    const diverged = divergedContractProbes(run('before', before), run('after', after))
+    expect(diverged).toEqual([
+      { probeId: 'billing', file: 'billing.openapi.yaml', beforeDigest: DOC_A, afterDigest: DOC_B },
+    ])
+  })
+
+  it('a null digest (unreadable document) is not divergence — the probe reports unknown', () => {
+    const before = [contractProbe('p', 'passed', 'x.yaml', DOC_A)]
+    const after = [contractProbe('p', 'unknown', 'x.yaml', null)]
+    expect(divergedContractProbes(run('before', before), run('after', after))).toEqual([])
+  })
+
+  it('excludes diverged probes from regression attribution and names them in api-contract-changed', () => {
+    const before = [
+      contractProbe('users', 'passed', 'users.openapi.yaml', DOC_A),
+      contractProbe('billing', 'passed', 'billing.openapi.yaml', DOC_A),
+    ]
+    const after = [
+      contractProbe('users', 'failed', 'users.openapi.yaml', DOC_A),
+      contractProbe('billing', 'failed', 'billing.openapi.yaml', DOC_B),
+    ]
+    // users: comparable regression -> APROBE finding. billing: diverged ->
+    // EXCLUDED from attribution, named by api-contract-changed instead.
+    const findings = findingsFor(before, after)
+    const classes = findings.map((finding) => finding.findingClass)
+    expect(classes).toContain('api-contract-regression')
+    expect(classes).not.toContain('service-regression')
+    const changed = findings.find((finding) => finding.findingClass === 'api-contract-changed')
+    expect(changed?.message).toContain('billing')
+    expect(changed?.message).toContain('billing.openapi.yaml')
+    expect(changed?.paths).toEqual(['billing.openapi.yaml'])
+    expect(changed?.message).not.toContain('users')
+    const regression = findings.find((finding) => finding.findingClass === 'api-contract-regression')
+    expect(regression?.message).toContain('users')
+  })
+
+  it('probeBaselineStatus forces partial naming only the affected probe', () => {
+    const contribution = probeBaselineStatus({
+      transitions: [],
+      manifestMode: 'comparable',
+      diverged: [{ probeId: 'billing', file: 'billing.openapi.yaml', beforeDigest: DOC_A, afterDigest: DOC_B }],
+      runs: [],
+    })
+    expect(contribution.status).toBe('partial')
+    expect(contribution.incompleteReasons).toEqual([
+      'the referenced API contract changed for probe(s) "billing" (billing.openapi.yaml), so their outcomes are of limited comparability',
+    ])
   })
 })
