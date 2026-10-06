@@ -361,6 +361,23 @@ describe('M5b.1: per-probe contract identity', () => {
     expect(divergedContractProbes(run('before', before), run('after', after))).toEqual([])
   })
 
+  it('M5b.2 regression: a null digest suppresses divergence even when file/method/path/status ALL changed', () => {
+    // The document is unresolved on the after side, so we do not possess a
+    // complete contract identity there — no divergence may be inferred from
+    // the remaining fields. Unknown is not divergence (M5b.1 invariant).
+    const beforeProbe: ProbeOutcome = {
+      ...contractProbe('p', 'passed', 'a.yaml', DOC_A),
+      contractIdentity: { file: 'a.yaml', documentDigest: DOC_A, method: 'GET', path: '/users', status: 200 },
+    }
+    const afterProbe: ProbeOutcome = {
+      ...contractProbe('p', 'unknown', 'b.yaml', null),
+      contractIdentity: { file: 'b.yaml', documentDigest: null, method: 'POST', path: '/members', status: 201 },
+    }
+    expect(divergedContractProbes(run('before', [beforeProbe]), run('after', [afterProbe]))).toEqual([])
+    // Symmetric case: null digest on the BEFORE side.
+    expect(divergedContractProbes(run('before', [afterProbe]), run('after', [beforeProbe]))).toEqual([])
+  })
+
   it.each([
     {
       case: 'method changed (GET -> POST)',

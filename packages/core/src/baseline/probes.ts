@@ -135,8 +135,9 @@ function createFindingIdFactory(prefix: 'SPROBE' | 'APROBE' | 'PPROBE' | 'SMAN' 
 export interface DivergedContract {
   probeId: string
   file: string
-  beforeDigest: string | null
-  afterDigest: string | null
+  /** Non-null by construction: entries exist only when both digests resolved. */
+  beforeDigest: string
+  afterDigest: string
   /** Which identity components changed, sorted (file | document | method | path | status). */
   changedComponents: string[]
   /** Human-readable before/after summary of the operation reference. */
@@ -157,11 +158,15 @@ export function divergedContractProbes(beforeRun: ProbeRunResult, afterRun: Prob
     if (beforeProbe?.expectation !== 'contract' || beforeProbe.contractIdentity === undefined) continue
     const before = beforeProbe.contractIdentity
     const after = afterProbe.contractIdentity
-    // A null digest on either side is an unknown, not a divergence.
-    const digestsDiffer = before.documentDigest !== null && after.documentDigest !== null && before.documentDigest !== after.documentDigest
+    // M5b.1 invariant, enforced BEFORE any dimension comparison: a null
+    // digest on either side means the document is unresolved — we do not
+    // possess a complete contract identity on that side, so no divergence may
+    // be inferred from the remaining fields. The probe itself reports unknown
+    // with details; unknown is not divergence.
+    if (before.documentDigest === null || after.documentDigest === null) continue
     const changedComponents = [
       before.file !== after.file ? 'file' : null,
-      digestsDiffer ? 'document' : null,
+      before.documentDigest !== after.documentDigest ? 'document' : null,
       before.method !== after.method ? 'method' : null,
       before.path !== after.path ? 'path' : null,
       before.status !== after.status ? 'status' : null,
