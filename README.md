@@ -135,3 +135,8 @@ examples/todo-app # demo target: a real (small) app with a change contract
 docs/             # architecture
 scripts/demo.mjs  # the verify:demo scenario
 ```
+
+## Contributing and security
+
+- Contributing guide: `CONTRIBUTING.md`
+- Security policy: `SECURITY.md`
