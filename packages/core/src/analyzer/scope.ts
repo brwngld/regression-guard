@@ -31,6 +31,17 @@ function describeRule(rule: PathRule): string {
   return typeof rule === 'string' ? `glob:${rule}` : `category:${rule.category}`
 }
 
+/**
+ * Human reproduction command. 'working-tree' is a display label, not a git
+ * ref — a bare `git diff <ref>` already compares against the working tree,
+ * so the nonexistent ref must never be named in a runnable command.
+ */
+function gitDiffReproduction(before: string, after: string, path?: string): string {
+  const suffix = path === undefined ? '' : ` -- ${path}`
+  const refs = after === 'working-tree' ? before : `${before} ${after}`
+  return `git -C <repo> diff ${refs}${suffix}`
+}
+
 function recordPaths(record: EnrichedRecord): string[] {
   return record.oldPath ? [record.path, record.oldPath] : [record.path]
 }
@@ -177,7 +188,7 @@ function diffEvidence(
             },
           ]
         : [],
-    reproduction: `git -C <repo> diff ${enriched.changeSet.before} ${enriched.changeSet.after} -- ${record.path}`,
+    reproduction: gitDiffReproduction(enriched.changeSet.before, enriched.changeSet.after, record.path),
   }
 }
 
@@ -368,7 +379,7 @@ export function analyzeScope(
         claim: 'The change introduces dependencies that were not present before.',
         observation: `Added: ${added.map((dep) => `${dep.name}@${dep.version ?? '?'}`).join(', ')}.`,
         changedLines: [],
-        reproduction: `git -C <repo> diff ${enriched.changeSet.before} ${enriched.changeSet.after} -- package.json`,
+        reproduction: gitDiffReproduction(enriched.changeSet.before, enriched.changeSet.after, 'package.json'),
       },
     )
   }
@@ -382,7 +393,7 @@ export function analyzeScope(
         claim: 'The change removes dependencies that were present before.',
         observation: `Removed: ${removed.map((dep) => dep.name).join(', ')}.`,
         changedLines: [],
-        reproduction: `git -C <repo> diff ${enriched.changeSet.before} ${enriched.changeSet.after} -- package.json`,
+        reproduction: gitDiffReproduction(enriched.changeSet.before, enriched.changeSet.after, 'package.json'),
       },
     )
   }
@@ -396,7 +407,7 @@ export function analyzeScope(
         claim: 'The change updates dependency versions.',
         observation: `Changed: ${changed.map((dep) => `${dep.name} ${dep.from} -> ${dep.to}`).join(', ')}.`,
         changedLines: [],
-        reproduction: `git -C <repo> diff ${enriched.changeSet.before} ${enriched.changeSet.after} -- package.json`,
+        reproduction: gitDiffReproduction(enriched.changeSet.before, enriched.changeSet.after, 'package.json'),
       },
     )
   }
@@ -419,7 +430,7 @@ export function analyzeScope(
           claim: `The requested change appears unaccomplished: must-change area ${rule} was not touched.`,
           observation: `No path in the diff between ${enriched.changeSet.before} and ${enriched.changeSet.after} matches ${rule}.`,
           changedLines: [],
-          reproduction: `git -C <repo> diff --name-only ${enriched.changeSet.before} ${enriched.changeSet.after}`,
+          reproduction: `git -C <repo> diff --name-only ${enriched.changeSet.after === 'working-tree' ? enriched.changeSet.before : `${enriched.changeSet.before} ${enriched.changeSet.after}`}`,
         },
       )
     }

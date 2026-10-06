@@ -260,6 +260,61 @@ export function addTask(tasks, text) {
 })
 
 describe('working-tree verification (uncommitted changes)', () => {
+  it('does not falsely report dependencies removed when package.json declares deps (found in hands-on verification)', async () => {
+    // Regression: enrichChangeSet read the after package.json via the
+    // nonexistent git ref 'working-tree', which parsed as an empty manifest
+    // and reported every declared dependency as removed. The after package
+    // is the materialized file on disk — the state the fingerprint names.
+    const repo = await TempRepo.create({
+      ...SAMPLE_APP,
+      'package.json': JSON.stringify(
+        {
+          name: 'dep-wt-app',
+          version: '1.0.0',
+          type: 'module',
+          scripts: { test: 'node tests/run.js' },
+          devDependencies: { vite: '^8.0.0', vitest: '^5.0.0' },
+        },
+        null,
+        2,
+      ),
+    })
+    await repo.git('branch', 'base')
+
+    // Uncommitted styling edit; package.json untouched.
+    await repo.write({ 'src/style.css': 'body { margin: 1rem; }\n' })
+
+    const report = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      mode: 'working-tree',
+      contract: 'version: 1\nid: wt-deps\ngoal: polish styles\npaths:\n  mustChange: ["src/style.css"]\n',
+      runTests: false,
+      reproduction: false,
+    })
+
+    const classes = report.findings.map((finding) => finding.findingClass)
+    expect(classes).not.toContain('removed-dependency')
+    expect(classes).not.toContain('new-dependency')
+    expect(classes).not.toContain('changed-dependency')
+    expect(report.verdict).toBe('ACCEPT')
+
+    // And findings that DO exist render runnable reproduction commands —
+    // never naming the 'working-tree' pseudo-ref.
+    await repo.write({ 'docs.txt': 'stray file\n' })
+    const withStray = await verifyChange({
+      repo: repo.dir,
+      before: 'base',
+      mode: 'working-tree',
+      contract: 'version: 1\nid: wt-deps\ngoal: polish styles\npaths:\n  mustChange: ["src/style.css"]\n',
+      runTests: false,
+      reproduction: false,
+    })
+    const stray = withStray.findings.find((finding) => finding.findingClass === 'out-of-scope-change')
+    expect(stray?.evidence.reproduction).toBe('git -C <repo> diff base -- docs.txt')
+    await repo.destroy()
+  })
+
   it('verifies dirty changes without committing and without mutating the checkout', async () => {
     const repo = await TempRepo.create(fakeVitestApp(PASSING_SPECS))
     await repo.markExecutable('node_modules/.bin/vitest')

@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type {
   ChangeSet,
   DependencyChange,
@@ -110,7 +112,14 @@ export async function enrichChangeSet(
 
   const [beforePkgRaw, afterPkgRaw] = await Promise.all([
     git.readFileAt(changeSet.before, 'package.json'),
-    git.readFileAt(changeSet.after, 'package.json'),
+    // 'working-tree' is a display label, not a git ref: reading it via
+    // `git show` fails and parses as an EMPTY manifest, falsely reporting
+    // every declared dependency as removed. The after package.json in
+    // working-tree mode is the materialized file on disk — the exact state
+    // the fingerprint identifies.
+    changeSet.after === 'working-tree'
+      ? readFile(join(git.repoRoot, 'package.json'), 'utf8').catch(() => null)
+      : git.readFileAt(changeSet.after, 'package.json'),
   ])
 
   const parseJson = (raw: string | null): unknown => {
