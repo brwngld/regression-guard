@@ -172,7 +172,8 @@ describe('M5b: API contract verification scenarios', () => {
     const changed = report.findings.find((f) => f.findingClass === 'api-contract-changed')
     expect(changed?.severity).toBe('info')
     expect(changed?.evidence.kind).toBe('api-contract')
-    expect(report.verdict).toBe('ACCEPT')
+    // H1: partial verification no longer ACCEPTs by default (frozen spec).
+    expect(report.verdict).toBe('REVIEW')
     await repo.destroy()
   })
 
@@ -373,7 +374,8 @@ server.listen(${PORT}, '127.0.0.1')
 
     // Forced partial, never pass; scope-clean change stays ACCEPT.
     expect(report.threeQuestions.regressions.status).toBe('partial')
-    expect(report.verdict).toBe('ACCEPT')
+    // H1: partial verification no longer ACCEPTs by default (frozen spec).
+    expect(report.verdict).toBe('REVIEW')
 
     // Diverged probes are excluded from attribution: no api-contract-regression
     // for billing even though its transition table entry exists.
@@ -547,7 +549,8 @@ server.listen(${PORT}, '127.0.0.1')
     expect(changed?.message).toContain('GET /health 200')
     expect(changed?.message).toContain('POST /health 201')
     expect(report.findings.map((finding) => finding.findingClass)).not.toContain('api-contract-regression')
-    expect(report.verdict).toBe('ACCEPT')
+    // H1: partial verification no longer ACCEPTs by default (frozen spec).
+    expect(report.verdict).toBe('REVIEW')
     await repo.destroy()
   })
 })

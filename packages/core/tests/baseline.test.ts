@@ -184,7 +184,8 @@ export function addTask(tasks, text) {
     const classes = report.findings.map((finding) => finding.findingClass)
     expect(classes).toContain('baseline-incomplete')
     expect(classes).not.toContain('test-regression')
-    expect(report.verdict).toBe('ACCEPT')
+    // H1: partial verification no longer ACCEPTs by default (frozen spec).
+    expect(report.verdict).toBe('REVIEW')
     await repo.destroy()
   })
 
@@ -497,7 +498,8 @@ describe('M2.1: test-plan comparability', () => {
     expect(changed?.message).toContain('node tests/other.js')
     expect(changed?.severity).toBe('info')
     // Scope-clean change: the info finding alone must not poison the gate.
-    expect(report.verdict).toBe('ACCEPT')
+    // H1: partial verification no longer ACCEPTs by default (frozen spec).
+    expect(report.verdict).toBe('REVIEW')
     await repo.destroy()
   })
 

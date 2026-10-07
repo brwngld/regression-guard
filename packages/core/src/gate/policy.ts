@@ -18,14 +18,19 @@ export const DEFAULT_POLICY: Record<FindingClass, PolicyAction> = {
   'sensitive-file-changed': 'review',
   'unfulfilled-contract': 'review',
   // Deterministic PASS -> FAIL transitions reject by default. Pre-existing
-  // failures and incomplete baselines are visible but must not independently
-  // worsen the gate verdict.
+  // failures are visible but must not independently worsen the gate verdict.
   'test-regression': 'reject',
   'pre-existing-failure': 'accept',
-  'baseline-incomplete': 'accept',
-  // Visible but never independently worsens the verdict; paired with a forced
-  // `partial` regressions status when the test command changes across refs.
-  'test-command-changed': 'accept',
+  // H1 (verification completeness): partial/inconclusive verification must
+  // not ACCEPT by default — an incomplete baseline hides regressions rather
+  // than proving their absence. Infra failure is a human decision, not a
+  // violation: review, never reject, by default; a contract policy override
+  // (`policy: { baseline-incomplete: accept }`) is the explicit authorization.
+  'baseline-incomplete': 'review',
+  // H1: a changed test plan is also incomplete verification (each side ran a
+  // different command), so it reviews by default — never rejects on its own;
+  // the explicit contract override remains the authorization mechanism.
+  'test-command-changed': 'review',
   // Deterministic PASS -> FAIL probe transitions reject by default, exactly
   // like test regressions; a changed manifest is visible but never worsens
   // the gate on its own (it forces partial probe comparability instead).
@@ -42,6 +47,11 @@ export const DEFAULT_POLICY: Record<FindingClass, PolicyAction> = {
   // or broken manifest is already penalized through out-of-scope scope
   // findings (and baseline partial when tests run).
   'dependency-state-unknown': 'accept',
+  // H2: baseline test ids with no after outcome mean the executed coverage
+  // shrank. Warn-severity, reviews by default — a coverage loss is a decision
+  // to re-authorize, not a deterministic violation, and a contract override
+  // can accept it explicitly.
+  'test-coverage-reduced': 'review',
 }
 
 const ACTION_RANK: Record<PolicyAction, number> = {

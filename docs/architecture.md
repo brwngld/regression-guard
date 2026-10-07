@@ -299,6 +299,51 @@ incompleteness, never extra risk in the change. The invariant: M3 informs but
 never reduces M2's full baseline — `--affected-only` is deliberately absent
 until prediction data justifies it.
 
+### Verification completeness (gate invariant)
+
+> **A verification result with `regressions.status = partial` must not produce
+> an ACCEPT verdict unless the contract explicitly authorizes acceptance of
+> incomplete verification.**
+
+If verification was attempted and became incomplete — missing tests, a changed
+test plan, an unreachable runner, a timed-out suite — the gate says REVIEW by
+default: `baseline-incomplete`, `test-command-changed`, and
+`test-coverage-reduced` all review, never reject (infrastructure failure is a
+human decision, not a violation). If verification was deliberately skipped
+(`--skip-tests`, or a repository declaring no verification), the operator
+explicitly chose that workflow and ACCEPT remains possible. A contract policy
+override (`policy: { baseline-incomplete: accept }`) is the explicit
+authorization mechanism: authorization changes what the scope analyzer says;
+it never converts incomplete verification into complete verification.
+
+`test-coverage-reduced` (TCOV) fires when baseline test ids have no after
+outcome — whichever way the coverage vanished (deletion, command narrowing,
+config exclusion, rename beyond recognition) — and its observation
+distinguishes explained loss (the test file was deleted; see the
+deleted-test scope finding) from unexplained loss (the file is still there
+but its ids no longer execute). Coverage is id-based: a rename that preserves
+identity emits nothing, because a changed filename is not automatically
+evidence loss.
+
+**The verification surface is itself protected infrastructure.** A change
+contract may authorize legitimate test evolution, but authorization of a test
+edit does not authorize weakening the evidentiary strength of the baseline.
+What the engine can prove structurally:
+
+| Provable                                     | Not provable in general            |
+| -------------------------------------------- | ---------------------------------- |
+| test deleted (file or id)                    | same id, same count, same command, |
+| test id disappeared from execution           | same execution, same PASS — with a |
+| test command narrowed                        | secretly weakened assertion        |
+| directory/config exclusion of tests          |                                    |
+| rename that changes test identity            |                                    |
+
+The right column is a **documented boundary** of deterministic verification
+(red-team attack 2b, preserved as a permanent tripwire fixture asserting
+today's honest ACCEPT): it is deliberately not "solved" with heuristics,
+because a heuristic that guesses semantic weakening would manufacture false
+claims — exactly what this engine exists to prevent.
+
 ### Reproduction & Repair Preparation (M4)
 
 Findings become **structured experiments**: a command is executable + args (the

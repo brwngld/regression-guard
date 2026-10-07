@@ -103,6 +103,11 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
       after: mode === 'working-tree' ? { workingTree: true } : { ref: input.after ?? 'HEAD' },
       workingTreeChanges: mode === 'working-tree' ? changeSet.records : undefined,
       workingTree: mode === 'working-tree' ? changeSet.workingTree : undefined,
+      // H2: deleted paths classify coverage loss as explained (file deleted)
+      // vs unexplained (file present, ids gone from execution). Both modes.
+      deletedPaths: changeSet.records
+        .filter((record) => record.status === 'deleted')
+        .map((record) => record.path),
       timeoutMs: input.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS,
     })
     regressions = outcome.regressions

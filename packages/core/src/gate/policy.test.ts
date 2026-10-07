@@ -36,9 +36,20 @@ describe('applyPolicy', () => {
     expect(DEFAULT_POLICY['new-dependency']).toBe('review')
   })
 
-  it('accepts test-command-changed findings without worsening the verdict', () => {
-    expect(DEFAULT_POLICY['test-command-changed']).toBe('accept')
-    expect(applyPolicy([findingOf('test-command-changed')]).verdict).toBe('ACCEPT')
+  // H1: a changed test plan is incomplete verification — reviews by default;
+  // the contract override is the explicit authorization (H4 mechanism).
+  it('reviews test-command-changed findings by default; contract override accepts', () => {
+    expect(DEFAULT_POLICY['test-command-changed']).toBe('review')
+    expect(applyPolicy([findingOf('test-command-changed')]).verdict).toBe('REVIEW')
+    expect(
+      applyPolicy([findingOf('test-command-changed')], { 'test-command-changed': 'accept' }).verdict,
+    ).toBe('ACCEPT')
+  })
+
+  // H2: coverage loss reviews by default; never rejects on its own.
+  it('reviews test-coverage-reduced findings by default', () => {
+    expect(DEFAULT_POLICY['test-coverage-reduced']).toBe('review')
+    expect(applyPolicy([findingOf('test-coverage-reduced')]).verdict).toBe('REVIEW')
   })
 
   it('falls back to warn for findings from a future schema version', () => {

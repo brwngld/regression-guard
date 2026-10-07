@@ -73,6 +73,10 @@ export function severityForClass(findingClass: FindingClass | string): 'info' | 
     case 'service-manifest-invalid':
     case 'dependency-state-unknown':
       return 'info'
+    case 'test-coverage-reduced':
+      // H2: shrunken executed coverage is a warning — real evidence loss, but
+      // not a deterministic behavioral violation.
+      return 'warn'
     default:
       return 'warn'
   }

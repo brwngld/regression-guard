@@ -40,7 +40,7 @@ paths:
 # (prohibited-change, preserved-area-changed, out-of-scope-change,
 #  new-dependency, removed-dependency, changed-dependency, deleted-test,
 #  sensitive-file-changed, unfulfilled-contract, test-command-changed,
-#  dependency-state-unknown)
+#  dependency-state-unknown, test-coverage-reduced)
 # policy:
 #   out-of-scope-change: warn
 
