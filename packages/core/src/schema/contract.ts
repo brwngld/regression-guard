@@ -58,6 +58,10 @@ export const FindingClassSchema = z.enum([
   'api-contract-regression',
   'api-contract-changed',
   'service-manifest-invalid',
+  // Hardening (adversarial stress tests): the package manifest is missing or
+  // unparseable at a compared state, so the dependency diff is UNKNOWN.
+  // Unknown is reported as unknown — never collapsed into removal findings.
+  'dependency-state-unknown',
 ])
 export type FindingClass = z.infer<typeof FindingClassSchema>
 

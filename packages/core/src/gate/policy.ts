@@ -37,6 +37,11 @@ export const DEFAULT_POLICY: Record<FindingClass, PolicyAction> = {
   'api-contract-regression': 'reject',
   'api-contract-changed': 'accept',
   'service-manifest-invalid': 'accept',
+  // Hardening: a missing/malformed package manifest makes the dependency diff
+  // unknowable. Visible but never independently gate-worsening — the missing
+  // or broken manifest is already penalized through out-of-scope scope
+  // findings (and baseline partial when tests run).
+  'dependency-state-unknown': 'accept',
 }
 
 const ACTION_RANK: Record<PolicyAction, number> = {

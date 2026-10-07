@@ -99,6 +99,34 @@ export function diffDependencies(beforePkg: unknown, afterPkg: unknown): {
   return { added, removed, changed }
 }
 
+/**
+ * Tri-state result of reading the package manifest at one compared state.
+ * 'missing' and 'malformed' both mean "the evidence could not be read" —
+ * which must never be collapsed into "the manifest is empty", because an
+ * empty manifest diffs as if every dependency were removed.
+ * Owned by the schema layer (see schema/changeset.ts); re-exported here for
+ * analyzer consumers.
+ */
+export type { ManifestReadability } from '../schema/changeset'
+import type { ManifestReadability } from '../schema/changeset'
+
+interface ManifestRead {
+  readability: ManifestReadability
+  /** Only meaningful when readability is 'parsed'. */
+  pkg: unknown
+}
+
+function readManifest(raw: string | null): ManifestRead {
+  if (raw === null) {
+    return { readability: 'missing', pkg: {} }
+  }
+  try {
+    return { readability: 'parsed', pkg: JSON.parse(raw) as unknown }
+  } catch {
+    return { readability: 'malformed', pkg: {} }
+  }
+}
+
 /** Enrich a ChangeSet with categories, test detection, and dependency changes. */
 export async function enrichChangeSet(
   git: GitAdapter,
@@ -122,20 +150,22 @@ export async function enrichChangeSet(
       : git.readFileAt(changeSet.after, 'package.json'),
   ])
 
-  const parseJson = (raw: string | null): unknown => {
-    if (raw === null) {
-      return {}
-    }
-    try {
-      return JSON.parse(raw)
-    } catch {
-      return {}
-    }
-  }
+  const before = readManifest(beforePkgRaw)
+  const after = readManifest(afterPkgRaw)
+
+  // Dependency comparison is ONLY claimed when both manifests were actually
+  // read and parsed. A missing or malformed manifest on either side is an
+  // unknown, and unknown is never guessed into "removed" (or anything else):
+  // the scope analyzer reports the state as unknown instead.
+  const dependencies =
+    before.readability === 'parsed' && after.readability === 'parsed'
+      ? diffDependencies(before.pkg, after.pkg)
+      : { added: [], removed: [], changed: [] }
 
   return {
     changeSet,
     records,
-    dependencies: diffDependencies(parseJson(beforePkgRaw), parseJson(afterPkgRaw)),
+    dependencies,
+    manifestReadability: { before: before.readability, after: after.readability },
   }
 }

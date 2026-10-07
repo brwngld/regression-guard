@@ -1,6 +1,14 @@
 import { z } from 'zod'
 import type { SensitiveCategory } from './contract'
 
+/**
+ * Tri-state result of reading the package manifest at one compared state.
+ * 'missing' and 'malformed' both mean "the evidence could not be read" —
+ * which must never be collapsed into "the manifest is empty", because an
+ * empty manifest diffs as if every dependency were removed.
+ */
+export type ManifestReadability = 'parsed' | 'missing' | 'malformed'
+
 export const ChangeStatusSchema = z.enum(['modified', 'created', 'deleted', 'renamed'])
 export type ChangeStatus = z.infer<typeof ChangeStatusSchema>
 
@@ -72,4 +80,11 @@ export type EnrichedChangeSet = {
     removed: DependencyChange[]
     changed: DependencyChange[]
   }
+  /**
+   * Whether the package manifest at each compared state was actually read and
+   * parsed. When either side is not 'parsed', `dependencies` is deliberately
+   * empty: unreadable evidence must never be diffed as if it were an empty
+   * manifest (which would report every dependency as removed).
+   */
+  manifestReadability: { before: ManifestReadability; after: ManifestReadability }
 }

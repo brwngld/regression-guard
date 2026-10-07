@@ -39,7 +39,8 @@ paths:
 # Optional policy overrides per finding class:
 # (prohibited-change, preserved-area-changed, out-of-scope-change,
 #  new-dependency, removed-dependency, changed-dependency, deleted-test,
-#  sensitive-file-changed, unfulfilled-contract, test-command-changed)
+#  sensitive-file-changed, unfulfilled-contract, test-command-changed,
+#  dependency-state-unknown)
 # policy:
 #   out-of-scope-change: warn
 

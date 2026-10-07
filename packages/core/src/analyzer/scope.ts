@@ -5,6 +5,7 @@ import type { Finding, Evidence } from '../schema/evidence'
 import { severityForClass } from '../schema/evidence'
 import type { PathAssessment, ScopeAssessment, ScopeClassification } from '../schema/scope'
 import type { DependencyGraph } from '../intel/graph'
+import type { ManifestReadability } from './change'
 
 /**
  * The Scope Analyzer answers: "should this have changed?"
@@ -40,6 +41,53 @@ function gitDiffReproduction(before: string, after: string, path?: string): stri
   const suffix = path === undefined ? '' : ` -- ${path}`
   const refs = after === 'working-tree' ? before : `${before} ${after}`
   return `git -C <repo> diff ${refs}${suffix}`
+}
+
+/**
+ * Runnable inspection of one side's package manifest for the
+ * dependency-state-unknown finding. Ref sides get a `git show` command; the
+ * working tree is not a git ref, so naming it in one would produce a command
+ * that can never run — it gets a plain instruction instead.
+ */
+function manifestReadReproduction(side: 'before' | 'after', enriched: EnrichedChangeSet): string {
+  const ref = side === 'before' ? enriched.changeSet.before : enriched.changeSet.after
+  return ref === 'working-tree'
+    ? 'read package.json from the working tree'
+    : `git -C <repo> show ${ref}:package.json`
+}
+
+/** The compared sides whose package manifest could not be read and parsed. */
+function unknownManifestSides(
+  enriched: EnrichedChangeSet,
+): { side: 'before' | 'after'; readability: ManifestReadability }[] {
+  return (['before', 'after'] as const)
+    .map((side) => ({ side, readability: enriched.manifestReadability[side] }))
+    .filter((entry) => entry.readability !== 'parsed')
+}
+
+/**
+ * The single honest finding emitted instead of a dependency diff when the
+ * package manifest at either compared state is missing or unparseable.
+ * "I could not read the evidence" must never become "the evidence says
+ * removed" — unknown stays unknown, visibly.
+ */
+function dependencyStateUnknownEvidence(
+  enriched: EnrichedChangeSet,
+  unknownSides: { side: 'before' | 'after'; readability: ManifestReadability }[],
+): Evidence {
+  const describe = (entry: { side: 'before' | 'after'; readability: ManifestReadability }): string =>
+    `the ${entry.side} package manifest is ${entry.readability}`
+
+  return {
+    kind: 'dependency',
+    claim:
+      'The dependency diff cannot be determined because a package manifest is missing or unparseable; absence of removed/added/changed findings here means UNKNOWN, not unchanged.',
+    observation: `Manifest readability — before: ${enriched.manifestReadability.before}, after: ${enriched.manifestReadability.after}. No dependency diff was computed (${unknownSides.map(describe).join(' and ')}).`,
+    changedLines: [],
+    reproduction: unknownSides
+      .map((entry) => manifestReadReproduction(entry.side, enriched))
+      .join(' ; '),
+  }
 }
 
 function recordPaths(record: EnrichedRecord): string[] {
@@ -198,6 +246,8 @@ function classPrefix(findingClass: FindingClass): string {
     case 'removed-dependency':
     case 'changed-dependency':
       return 'DEP'
+    case 'dependency-state-unknown':
+      return 'DEPU'
     case 'deleted-test':
       return 'TEST'
     case 'unfulfilled-contract':
@@ -368,47 +418,64 @@ export function analyzeScope(
     }
   }
 
+  // Dependency findings are claimed ONLY when both manifests were actually
+  // read and parsed. When either side is missing or malformed the diff is
+  // unknowable, and exactly one informational finding says so — an unreadable
+  // manifest must never be diffed as an empty one (which would report every
+  // dependency as removed).
+  const unknownManifest = unknownManifestSides(enriched)
   const { added, removed, changed } = enriched.dependencies
-  if (added.length > 0) {
+  if (unknownManifest.length === 0) {
+    if (added.length > 0) {
+      log.add(
+        'new-dependency',
+        `New dependencies introduced: ${added.map((dep) => `${dep.name}@${dep.version ?? '?'} (${dep.section})`).join(', ')}.`,
+        ['package.json'],
+        {
+          kind: 'dependency',
+          claim: 'The change introduces dependencies that were not present before.',
+          observation: `Added: ${added.map((dep) => `${dep.name}@${dep.version ?? '?'}`).join(', ')}.`,
+          changedLines: [],
+          reproduction: gitDiffReproduction(enriched.changeSet.before, enriched.changeSet.after, 'package.json'),
+        },
+      )
+    }
+    if (removed.length > 0) {
+      log.add(
+        'removed-dependency',
+        `Dependencies removed: ${removed.map((dep) => `${dep.name} (${dep.section})`).join(', ')}.`,
+        ['package.json'],
+        {
+          kind: 'dependency',
+          claim: 'The change removes dependencies that were present before.',
+          observation: `Removed: ${removed.map((dep) => dep.name).join(', ')}.`,
+          changedLines: [],
+          reproduction: gitDiffReproduction(enriched.changeSet.before, enriched.changeSet.after, 'package.json'),
+        },
+      )
+    }
+    if (changed.length > 0) {
+      log.add(
+        'changed-dependency',
+        `Dependency versions changed: ${changed.map((dep) => `${dep.name} ${dep.from} -> ${dep.to}`).join(', ')}.`,
+        ['package.json'],
+        {
+          kind: 'dependency',
+          claim: 'The change updates dependency versions.',
+          observation: `Changed: ${changed.map((dep) => `${dep.name} ${dep.from} -> ${dep.to}`).join(', ')}.`,
+          changedLines: [],
+          reproduction: gitDiffReproduction(enriched.changeSet.before, enriched.changeSet.after, 'package.json'),
+        },
+      )
+    }
+  } else {
+    const describe = (entry: { side: string; readability: ManifestReadability }): string =>
+      `the ${entry.side} package manifest is ${entry.readability}`
     log.add(
-      'new-dependency',
-      `New dependencies introduced: ${added.map((dep) => `${dep.name}@${dep.version ?? '?'} (${dep.section})`).join(', ')}.`,
+      'dependency-state-unknown',
+      `Dependency state unknown: ${unknownManifest.map(describe).join(' and ')}; no dependency comparison is claimed.`,
       ['package.json'],
-      {
-        kind: 'dependency',
-        claim: 'The change introduces dependencies that were not present before.',
-        observation: `Added: ${added.map((dep) => `${dep.name}@${dep.version ?? '?'}`).join(', ')}.`,
-        changedLines: [],
-        reproduction: gitDiffReproduction(enriched.changeSet.before, enriched.changeSet.after, 'package.json'),
-      },
-    )
-  }
-  if (removed.length > 0) {
-    log.add(
-      'removed-dependency',
-      `Dependencies removed: ${removed.map((dep) => `${dep.name} (${dep.section})`).join(', ')}.`,
-      ['package.json'],
-      {
-        kind: 'dependency',
-        claim: 'The change removes dependencies that were present before.',
-        observation: `Removed: ${removed.map((dep) => dep.name).join(', ')}.`,
-        changedLines: [],
-        reproduction: gitDiffReproduction(enriched.changeSet.before, enriched.changeSet.after, 'package.json'),
-      },
-    )
-  }
-  if (changed.length > 0) {
-    log.add(
-      'changed-dependency',
-      `Dependency versions changed: ${changed.map((dep) => `${dep.name} ${dep.from} -> ${dep.to}`).join(', ')}.`,
-      ['package.json'],
-      {
-        kind: 'dependency',
-        claim: 'The change updates dependency versions.',
-        observation: `Changed: ${changed.map((dep) => `${dep.name} ${dep.from} -> ${dep.to}`).join(', ')}.`,
-        changedLines: [],
-        reproduction: gitDiffReproduction(enriched.changeSet.before, enriched.changeSet.after, 'package.json'),
-      },
+      dependencyStateUnknownEvidence(enriched, unknownManifest),
     )
   }
 

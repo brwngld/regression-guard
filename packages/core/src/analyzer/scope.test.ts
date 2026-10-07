@@ -19,7 +19,11 @@ function record(overrides: Partial<EnrichedRecord> & { path: string }): Enriched
   }
 }
 
-function enriched(records: EnrichedRecord[], dependencies: EnrichedChangeSet['dependencies'] = { added: [], removed: [], changed: [] }): EnrichedChangeSet {
+function enriched(
+  records: EnrichedRecord[],
+  dependencies: EnrichedChangeSet['dependencies'] = { added: [], removed: [], changed: [] },
+  manifestReadability: EnrichedChangeSet['manifestReadability'] = { before: 'parsed', after: 'parsed' },
+): EnrichedChangeSet {
   return {
     changeSet: {
       before: 'main',
@@ -30,6 +34,7 @@ function enriched(records: EnrichedRecord[], dependencies: EnrichedChangeSet['de
     },
     records,
     dependencies,
+    manifestReadability,
   }
 }
 
@@ -218,6 +223,92 @@ describe('analyzeScope classification', () => {
     )
     const dep = result.findings.find((finding) => finding.findingClass === 'new-dependency')
     expect(dep?.evidence.kind).toBe('dependency')
+  })
+})
+
+describe('dependency state unknown (missing or malformed package manifest)', () => {
+  it('reports one informational DEPU finding instead of a diff when the after manifest is malformed', () => {
+    const result = analyzeScope(
+      contractOf({ mustChange: ['src/style.css'] }),
+      enriched(
+        [record({ path: 'src/style.css' }), record({ path: 'package.json' })],
+        { added: [], removed: [], changed: [] },
+        { before: 'parsed', after: 'malformed' },
+      ),
+      GRAPH,
+    )
+    const classes = result.findings.map((finding) => finding.findingClass)
+    expect(classes).not.toContain('new-dependency')
+    expect(classes).not.toContain('removed-dependency')
+    expect(classes).not.toContain('changed-dependency')
+    const unknown = result.findings.filter((finding) => finding.findingClass === 'dependency-state-unknown')
+    expect(unknown).toHaveLength(1)
+    expect(unknown[0]?.id).toBe('DEPU-001')
+    expect(unknown[0]?.severity).toBe('info')
+    expect(unknown[0]?.paths).toEqual(['package.json'])
+    expect(unknown[0]?.message).toBe(
+      'Dependency state unknown: the after package manifest is malformed; no dependency comparison is claimed.',
+    )
+    expect(unknown[0]?.evidence.kind).toBe('dependency')
+    expect(unknown[0]?.evidence.claim).toContain('UNKNOWN, not unchanged')
+    expect(unknown[0]?.evidence.observation).toContain('before: parsed, after: malformed')
+    expect(unknown[0]?.evidence.reproduction).toBe('git -C <repo> show feature:package.json')
+  })
+
+  it('names both sides and stays runnable in working-tree mode when neither manifest is readable', () => {
+    const fixture = enriched([], { added: [], removed: [], changed: [] }, {
+      before: 'missing',
+      after: 'malformed',
+    })
+    fixture.changeSet = { ...fixture.changeSet, after: 'working-tree' }
+
+    const result = analyzeScope(contractOf({}), fixture, GRAPH)
+    const classes = result.findings.map((finding) => finding.findingClass)
+    expect(classes).toEqual(['dependency-state-unknown'])
+    const unknown = result.findings[0]
+    expect(unknown?.message).toBe(
+      'Dependency state unknown: the before package manifest is missing and the after package manifest is malformed; no dependency comparison is claimed.',
+    )
+    expect(unknown?.evidence.reproduction).toBe(
+      'git -C <repo> show main:package.json ; read package.json from the working tree',
+    )
+  })
+
+  it('never emits a dependency diff from unreadable evidence, even if a diff was supplied', () => {
+    // Defense in depth: enrichChangeSet empties the diff when a manifest is
+    // unreadable, but the analyzer must not trust that — a stale or hand-built
+    // diff must not turn "could not read" into "removed".
+    const result = analyzeScope(
+      contractOf({ mustChange: ['src/style.css'] }),
+      enriched(
+        [record({ path: 'package.json' })],
+        {
+          added: [],
+          removed: [{ name: 'vite', section: 'devDependencies', version: '^5.0.0' }],
+          changed: [],
+        },
+        { before: 'parsed', after: 'missing' },
+      ),
+      GRAPH,
+    )
+    const classes = result.findings.map((finding) => finding.findingClass)
+    expect(classes).not.toContain('removed-dependency')
+    expect(classes.filter((cls) => cls === 'dependency-state-unknown')).toHaveLength(1)
+  })
+
+  it('still diffs dependencies when both manifests parsed (existing behavior)', () => {
+    const result = analyzeScope(
+      contractOf({ mustChange: ['src/style.css'] }),
+      enriched(
+        [record({ path: 'src/style.css' }), record({ path: 'package.json' })],
+        { added: [], removed: [{ name: 'vite', section: 'devDependencies', version: '^5.0.0' }], changed: [] },
+        { before: 'parsed', after: 'parsed' },
+      ),
+      GRAPH,
+    )
+    const classes = result.findings.map((finding) => finding.findingClass)
+    expect(classes).toContain('removed-dependency')
+    expect(classes).not.toContain('dependency-state-unknown')
   })
 })
 

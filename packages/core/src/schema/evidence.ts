@@ -71,6 +71,7 @@ export function severityForClass(findingClass: FindingClass | string): 'info' | 
     case 'service-manifest-changed':
     case 'api-contract-changed':
     case 'service-manifest-invalid':
+    case 'dependency-state-unknown':
       return 'info'
     default:
       return 'warn'

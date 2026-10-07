@@ -57,6 +57,7 @@ const OBJECTIVES_BY_CLASS: Record<FindingClass, string> = {
   'api-contract-regression': 'Repair the API contract violation so the contract-sourced probe passes again.',
   'api-contract-changed': 'Reconcile the API specification change or re-authorize the contract baseline.',
   'service-manifest-invalid': 'Fix the invalid service manifest so verification can execute.',
+  'dependency-state-unknown': 'Fix or restore the package manifest so dependency state can be compared.',
 }
 
 /** The dual-baseline rule every eventual repair change must satisfy. */

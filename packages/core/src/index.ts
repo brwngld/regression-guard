@@ -197,6 +197,7 @@ export {
 } from './intel/resolve'
 
 export { categorizePath, diffDependencies, enrichChangeSet } from './analyzer/change'
+export type { ManifestReadability } from './schema/changeset'
 export { analyzeScope } from './analyzer/scope'
 export type { ScopeResult } from './analyzer/scope'
 export { computeImpact } from './analyzer/impact'
