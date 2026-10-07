@@ -40,7 +40,9 @@ paths:
 # (prohibited-change, preserved-area-changed, out-of-scope-change,
 #  new-dependency, removed-dependency, changed-dependency, deleted-test,
 #  sensitive-file-changed, unfulfilled-contract, test-command-changed,
-#  dependency-state-unknown, test-coverage-reduced)
+#  dependency-state-unknown, test-coverage-reduced, requirement-failed,
+#  requirement-experiment-modified, requirement-binding-changed,
+#  requirement-unverified, experiment-new)
 # policy:
 #   out-of-scope-change: warn
 
@@ -104,12 +106,13 @@ program
       }
 
       let contractText: string
+      let contractPath: string
       try {
         // Relative --contract resolves against the process cwd first, then
         // falls back to the repository root (--cwd): contracts live in the
         // repo they govern, but the CLI is often invoked from elsewhere.
         const primary = path.resolve(options.contract)
-        const contractPath =
+        contractPath =
           existsSync(primary) || path.isAbsolute(options.contract)
             ? primary
             : path.resolve(options.cwd, options.contract)
@@ -128,6 +131,9 @@ program
         reproduction: options.skipReproduction ? false : undefined,
         testTimeoutMs,
         contract: contractText,
+        // The on-disk path enables binding-drift detection (Doc 1 §2.6) when
+        // the contract file is tracked inside the verified repository.
+        contractPath,
       })
 
       const body = options.format === 'json' ? report.json : report.markdown

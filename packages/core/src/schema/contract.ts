@@ -29,9 +29,35 @@ export const PathRuleSchema = z.union([
 ])
 export type PathRule = z.infer<typeof PathRuleSchema>
 
-export const AcceptanceCriterionSchema = z.object({
+/**
+ * ExperimentReference (Doc 1 §2.5): a CLOSED discriminated union naming the
+ * executable instrument a requirement clause is bound to. Kinds are closed —
+ * adding one is a schema decision, never silent. `dom-flow` is schema-valid
+ * but reserved for M5c (Doc 2): it always resolves UNVERIFIED (unbound-kind)
+ * until that kind exists.
+ */
+export const ExperimentReferenceSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('test'), id: z.string().min(1) }),
+  z.strictObject({
+    kind: z.literal('probe'),
+    /** Service-manifest path; omitted means the conventional manifest file. */
+    manifest: z.string().min(1).optional(),
+    probeId: z.string().min(1),
+  }),
+  z.strictObject({ kind: z.literal('dom-flow'), flowId: z.string().min(1) }),
+])
+export type ExperimentReference = z.infer<typeof ExperimentReferenceSchema>
+
+/**
+ * STRICT (same discipline as the contract root): a clause with a misspelled
+ * binding key must fail loudly — a silently dropped `experiments` entry would
+ * otherwise verify nothing while the report claimed a binding existed.
+ */
+export const AcceptanceCriterionSchema = z.strictObject({
   id: z.string().min(1),
   description: z.string().min(1),
+  /** Bound experiments (Doc 1 §2.5); every bound experiment must pass for VERIFIED. */
+  experiments: z.array(ExperimentReferenceSchema).optional(),
 })
 export type AcceptanceCriterion = z.infer<typeof AcceptanceCriterionSchema>
 
@@ -65,6 +91,12 @@ export const FindingClassSchema = z.enum([
   // H2 coverage signal: test ids that existed in the before baseline have no
   // after outcome — the executed coverage shrank, whatever the cause.
   'test-coverage-reduced',
+  // Requirement Verification (Doc 1 — claim/evidence/binding model):
+  'requirement-failed',
+  'requirement-experiment-modified',
+  'requirement-binding-changed',
+  'requirement-unverified',
+  'experiment-new',
 ])
 export type FindingClass = z.infer<typeof FindingClassSchema>
 

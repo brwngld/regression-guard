@@ -1,4 +1,7 @@
 import { parse as parseYaml } from 'yaml'
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import picomatch from 'picomatch'
 import { enrichChangeSet } from './analyzer/change'
 import { analyzeScope } from './analyzer/scope'
@@ -9,6 +12,8 @@ import { applyPolicy } from './gate/policy'
 import { renderMarkdownReport } from './report/markdown'
 import { ContractValidationError, parseContract } from './schema/contract'
 import type { ChangeContract, FindingClass, PolicyAction } from './schema/contract'
+import { INVALID_MANIFEST_DIGEST, type ProbeRunResult } from './schema/service'
+import type { TestRunResult } from './schema/baseline'
 import type { Finding } from './schema/evidence'
 import type { ImpactAssessment, PredictionReview } from './schema/impact'
 import type { ReproductionAssessment, StateIdentity } from './schema/reproduction'
@@ -24,6 +29,13 @@ import {
 } from './reproduction/engine'
 import { contractFingerprint, verificationContextId, verificationRunId } from './reproduction/identity'
 import { buildEvidencePackage } from './repair/proposal'
+import {
+  analyzeRequirements,
+  bindingSetsOfContract,
+  type RequirementAnalysis,
+  type RequirementProbeSide,
+  type RequirementTestSide,
+} from './requirement/verify'
 import { GitAdapter } from './vcs/git'
 
 export const DEFAULT_TEST_TIMEOUT_MS = 300_000
@@ -36,6 +48,15 @@ export interface VerifyInput {
   after?: string
   /** Parsed contract, or raw YAML text. */
   contract: ChangeContract | string
+  /**
+   * Path of the contract file, when it came from disk (absolute, inside the
+   * verified repository). Enables binding-drift detection (Doc 1 §2.6): the
+   * before-state contract is read from the path's repo-relative form when it
+   * lies inside the repository and is tracked at the before ref. Absent or
+   * outside the repo -> binding identity is established at the governing
+   * approval (no drift check, per §2.6 new-contract provenance).
+   */
+  contractPath?: string
   /** 'refs' (default) compares two refs; 'working-tree' verifies uncommitted changes on top of `before`. */
   mode?: 'refs' | 'working-tree'
   /** Execute the existing test suite for regression detection (default true). */
@@ -92,6 +113,10 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
 
   const { assessment, findings: scopeFindings } = analyzeScope(contract, enriched, graph)
 
+  const deletedPaths = changeSet.records
+    .filter((record) => record.status === 'deleted')
+    .map((record) => record.path)
+
   // Baseline Engine: deterministic existing-test regression detection.
   let regressions: VerificationReport['threeQuestions']['regressions'] = { status: 'not-verified' }
   let baselineFindings: typeof scopeFindings = []
@@ -105,9 +130,7 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
       workingTree: mode === 'working-tree' ? changeSet.workingTree : undefined,
       // H2: deleted paths classify coverage loss as explained (file deleted)
       // vs unexplained (file present, ids gone from execution). Both modes.
-      deletedPaths: changeSet.records
-        .filter((record) => record.status === 'deleted')
-        .map((record) => record.path),
+      deletedPaths,
       timeoutMs: input.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS,
     })
     regressions = outcome.regressions
@@ -115,6 +138,31 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
     if (outcome.baseline) {
       baseline = outcome.baseline
     }
+  }
+
+  // Requirement Verification (Doc 1 — claim/evidence/binding model): pure
+  // composition over evidence the baseline step ALREADY produced (per-test
+  // outcomes, probe outcomes); it runs no new experiments. Skipped entirely
+  // when the contract declares zero acceptance clauses — the structural
+  // accomplished semantics below stay untouched in that case.
+  let requirement: RequirementAnalysis | undefined
+  if (contract.acceptance.length > 0) {
+    const contractRelPath = repoRelativeInside(git.repoRoot, input.contractPath)
+    requirement = await analyzeRequirements(contract.acceptance, {
+      before: {
+        tests: testSideOf(baseline?.before),
+        probes: probeSideOf(baseline?.probes?.before, baseline !== undefined),
+      },
+      after: {
+        tests: testSideOf(baseline?.after),
+        probes: probeSideOf(baseline?.probes?.after, baseline !== undefined),
+      },
+      deletedPaths,
+      fileDigest: (state, path) =>
+        readDefinitionDigest(git, mode, input.before, input.after ?? 'HEAD', state, path),
+      beforeBindings: await loadBeforeBindings(git, input.before, contractRelPath),
+      contractPath: contractRelPath,
+    })
   }
 
   // Impact Analyzer (M3): given every change that actually occurred —
@@ -145,7 +193,9 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
     }
   }
 
-  const findings = [...scopeFindings, ...baselineFindings]
+  // Requirement findings join the gate with everything else: requirement-
+  // failed rejects, the review classes review, experiment-new never gates.
+  const findings = [...scopeFindings, ...baselineFindings, ...(requirement?.findings ?? [])]
   const gate = applyPolicy(findings, contract.policy as Partial<Record<FindingClass, PolicyAction>>)
 
   // M4 lineage. Two deliberately distinct identities: the context id is a
@@ -228,7 +278,7 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
       ),
     ),
   )
-  const accomplished: VerificationReport['threeQuestions']['accomplished'] =
+  const structuralAccomplished: VerificationReport['threeQuestions']['accomplished'] =
     mustChangeGlobs.length === 0
       ? 'unknown'
       : touchedGlobs.length === mustChangeGlobs.length
@@ -236,6 +286,11 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
         : touchedGlobs.length === 0
           ? 'no'
           : 'partial'
+  // Doc 1 §6, question 1: with acceptance clauses declared, `accomplished`
+  // aggregates the real clause evidence (any FAILED -> no, all VERIFIED ->
+  // yes, else partial) instead of the structural must-change-only computation.
+  const accomplished: VerificationReport['threeQuestions']['accomplished'] =
+    requirement !== undefined ? requirement.accomplishedContribution : structuralAccomplished
 
   const withinScope = findings.some((finding) =>
     ['prohibited-change', 'preserved-area-changed', 'out-of-scope-change'].includes(finding.findingClass),
@@ -275,6 +330,13 @@ export async function verifyChange(input: VerifyInput): Promise<VerifyOutput> {
   }
   if (baseline !== undefined) {
     report.baseline = baseline
+  }
+  if (requirement !== undefined) {
+    report.requirement = {
+      schemaVersion: requirement.schemaVersion,
+      clauses: requirement.clauses,
+      coverage: requirement.coverage,
+    }
   }
   if (impact !== undefined) {
     report.impact = impact
@@ -335,6 +397,109 @@ function stripRuntimeDetail(assessment: AssessmentWithDetail): ReproductionAsses
 
 function pathMatchesGlob(path: string, glob: string): boolean {
   return picomatch.isMatch(path, glob, { dot: true })
+}
+
+/**
+ * Repo-relative form of the contract path, only when it lies inside the
+ * repository root (comparison is case-insensitive on the root prefix, since
+ * Windows drive/device casing varies; the remainder keeps its author casing).
+ */
+function repoRelativeInside(repoRoot: string, contractPath: string | undefined): string | undefined {
+  if (contractPath === undefined) {
+    return undefined
+  }
+  const normalized = contractPath.replace(/\\/g, '/')
+  const root = repoRoot.replace(/\\/g, '/')
+  const lowerNormalized = normalized.toLowerCase()
+  const lowerRoot = root.toLowerCase()
+  if (!lowerNormalized.startsWith(`${lowerRoot}/`)) {
+    return undefined
+  }
+  return normalized.slice(root.length + 1)
+}
+
+/** Per-test outcomes a requirement clause's `test` bindings join against. */
+function testSideOf(run: TestRunResult | undefined): RequirementTestSide {
+  return { perTest: run?.mode === 'per-test', tests: run?.tests ?? [] }
+}
+
+/**
+ * One side's declared/executed probe state for the requirement layer:
+ * - baseline never ran -> the declared set is UNKNOWN (nothing was executed);
+ * - phase ran, side absent -> known-empty (nothing was declared);
+ * - invalid manifest -> declared-but-unloadable: the declared set is UNKNOWN
+ *   (absence would be guessed, not established — the I9 discipline);
+ * - valid manifest -> every declared probe with its definition identity.
+ */
+function probeSideOf(run: ProbeRunResult | undefined, phaseRan: boolean): RequirementProbeSide {
+  if (run === undefined) {
+    return { outcomes: new Map(), definitionIdentities: new Map(), declarationsKnown: phaseRan }
+  }
+  if (run.manifestDigest === INVALID_MANIFEST_DIGEST) {
+    return { outcomes: new Map(), definitionIdentities: new Map(), declarationsKnown: false }
+  }
+  return {
+    outcomes: new Map(run.probes.map((probe) => [probe.probeId, probe])),
+    definitionIdentities: new Map(
+      run.probes.map((probe) => [probe.probeId, probe.definitionIdentity ?? null]),
+    ),
+    declarationsKnown: true,
+  }
+}
+
+/**
+ * Whole-file definition digest of a repo file at a compared state (Doc 1 §2.3):
+ * `before` reads the ref, `after` reads the ref (refs mode) or the working
+ * tree (working-tree mode). null = unreadable — unknown, never divergence and
+ * never novelty (I9).
+ */
+async function readDefinitionDigest(
+  git: GitAdapter,
+  mode: 'refs' | 'working-tree',
+  beforeRef: string,
+  afterRef: string,
+  state: 'before' | 'after',
+  path: string,
+): Promise<string | null> {
+  const pending =
+    state === 'before'
+      ? git.readFileAt(beforeRef, path)
+      : mode === 'working-tree'
+        ? readFile(join(git.repoRoot, path), 'utf8').catch(() => null)
+        : git.readFileAt(afterRef, path)
+  const text = await pending
+  if (text === null) {
+    return null
+  }
+  return `def_${createHash('sha256').update(text, 'utf8').digest('hex')}`
+}
+
+/**
+ * The before-state contract's binding sets (Doc 1 §2.6), or null when no
+ * drift check applies: the path is unknown, lies outside the repository, or
+ * the file is absent at the before ref (the acceptance layer itself arrives
+ * with this change — binding identity is established at the governing
+ * approval, never binding drift; instrument provenance is evaluated
+ * independently). A before-state contract that no longer parses offers no
+ * comparable binding identity and is treated the same way — never as drift.
+ */
+async function loadBeforeBindings(
+  git: GitAdapter,
+  beforeRef: string,
+  contractRelPath: string | undefined,
+): Promise<Map<string, string[]> | null> {
+  if (contractRelPath === undefined) {
+    return null
+  }
+  const text = await git.readFileAt(beforeRef, contractRelPath)
+  if (text === null) {
+    return null
+  }
+  try {
+    return bindingSetsOfContract(parseContract(parseContractYaml(text)).acceptance)
+  } catch {
+    return null
+  }
 }
 
 /**

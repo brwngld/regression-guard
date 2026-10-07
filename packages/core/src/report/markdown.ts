@@ -1,6 +1,7 @@
 import type { StateIdentity } from '../schema/reproduction'
 import type { VerificationReport } from '../schema/report'
-import { INVALID_MANIFEST_DIGEST } from '../schema/service'
+import { INVALID_MANIFEST_DIGEST, SERVICE_MANIFEST_FILE } from '../schema/service'
+import type { ExperimentResolution, UnverifiedReason } from '../schema/requirement'
 
 /** Short identity form for header lines: first ~16 characters + ellipsis. */
 function shortId(id: string, keep = 16): string {
@@ -53,6 +54,45 @@ function regressionsLine(status: VerificationReport['threeQuestions']['regressio
     case 'partial':
       return `PARTIAL — baseline incomplete (${status.regressionsFound ?? 0} regression(s) found)`
   }
+}
+
+/** `test "id"` / `probe "id"` / `dom-flow "flowId"`, with a non-conventional manifest named. */
+function experimentLabel(experiment: ExperimentResolution): string {
+  const reference = experiment.reference
+  switch (reference.kind) {
+    case 'test':
+      return `test ${reference.id}`
+    case 'probe':
+      return `probe ${reference.probeId}${
+        reference.manifest !== undefined && reference.manifest !== SERVICE_MANIFEST_FILE
+          ? ` (manifest ${reference.manifest})`
+          : ''
+      }`
+    case 'dom-flow':
+      return `dom-flow ${reference.flowId}`
+  }
+}
+
+/** Provenance note in parentheses after the experiment label (Doc 1 §7). */
+function provenanceNote(provenance: ExperimentResolution['provenance']): string {
+  switch (provenance) {
+    case 'established':
+      return 'established instrument'
+    case 'modified':
+      return 'instrument modified by this change'
+    case 'new':
+      return 'new instrument — no before anchor'
+    case 'unbound-kind':
+      return 'kind not yet available'
+    case 'unknown-observability':
+      return 'observability unknown — suite-level outcomes'
+    default:
+      return 'unresolved'
+  }
+}
+
+function unverifiedReasonLabel(reason: UnverifiedReason): string {
+  return reason === 'no-binding' ? 'no binding' : reason
 }
 
 export function renderMarkdownReport(report: VerificationReport): string {
@@ -138,6 +178,34 @@ export function renderMarkdownReport(report: VerificationReport): string {
       push(probesLine)
     }
     push(`- **Executed:** \`${b.executedCommand}\` in isolated worktrees; the working checkout was not touched.`, '')
+  }
+
+  // Requirement verification (Doc 1 §7): claim, instrument, result, status —
+  // present only when the contract declares acceptance clauses.
+  if (report.requirement !== undefined) {
+    const requirement = report.requirement
+    push('### Requirement verification', '')
+    for (const clause of requirement.clauses) {
+      push(`${clause.clauseId}  ${clause.description}`)
+      if (clause.experiments.length === 0) {
+        push('         Experiment: —')
+      }
+      for (const experiment of clause.experiments) {
+        push(`         Experiment: ${experimentLabel(experiment)} (${provenanceNote(experiment.provenance)})`)
+        if (experiment.result !== undefined && experiment.result !== 'unknown') {
+          push(`         Result: ${experiment.result.toUpperCase()}`)
+        }
+      }
+      const status =
+        clause.status === 'unverified' && clause.reasons.length > 0
+          ? `UNVERIFIED (${clause.reasons.map(unverifiedReasonLabel).join(', ')})`
+          : clause.status.toUpperCase()
+      push(`         Status: ${status}`, '')
+    }
+    push(
+      `Requirement coverage: ${requirement.coverage.verified} of ${requirement.coverage.total} clauses VERIFIED, ${requirement.coverage.failed} FAILED, ${requirement.coverage.unverified} UNVERIFIED.`,
+      '',
+    )
   }
 
   if (report.impact !== undefined) {

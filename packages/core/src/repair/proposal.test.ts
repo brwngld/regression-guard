@@ -42,6 +42,13 @@ const EXPECTED_OBJECTIVES: Record<FindingClass, string> = {
   'service-manifest-invalid': 'Fix the invalid service manifest so verification can execute.',
   'dependency-state-unknown': 'Fix or restore the package manifest so dependency state can be compared.',
   'test-coverage-reduced': 'Restore the removed test coverage or re-authorize the verification plan.',
+  'requirement-failed': 'Make the required observable behavior hold as the bound experiment defines it.',
+  'requirement-experiment-modified':
+    'Restore the bound experiment to its approved definition or re-authorize the contract with the new definition.',
+  'requirement-binding-changed':
+    'Restore the requirement binding or re-authorize the contract with the new binding.',
+  'requirement-unverified': 'Complete requirement verification so every declared clause is verified.',
+  'experiment-new': 'Re-authorize the contract so the new experiment becomes an established instrument.',
 }
 
 function contractOf(paths: Record<string, unknown> = {}): ChangeContract {

@@ -52,6 +52,21 @@ export const DEFAULT_POLICY: Record<FindingClass, PolicyAction> = {
   // to re-authorize, not a deterministic violation, and a contract override
   // can accept it explicitly.
   'test-coverage-reduced': 'review',
+  // Requirement Verification defaults (Doc 1 §6, formerly strawmen OQ2/OQ4/
+  // OQ7/OQ1): a failed requirement is deterministic evidence the required
+  // behavior does not hold — reject. Instrument tampering and binding drift
+  // invalidate WHAT is being verified without proving anything — review until
+  // the contract is re-approved. UNVERIFIED requirements must not ACCEPT by
+  // default (the H1 pattern: incomplete verification hides regressions rather
+  // than proving their absence); the contract override accepts explicitly.
+  'requirement-failed': 'reject',
+  'requirement-experiment-modified': 'review',
+  'requirement-binding-changed': 'review',
+  'requirement-unverified': 'review',
+  // Doc 1 I9: a new instrument's result is recorded but it never counts toward
+  // VERIFIED — the clause already stays UNVERIFIED, so the signal itself is
+  // informational only and must never gate on its own.
+  'experiment-new': 'accept',
 }
 
 const ACTION_RANK: Record<PolicyAction, number> = {

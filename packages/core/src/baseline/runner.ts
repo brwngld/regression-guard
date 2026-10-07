@@ -16,11 +16,13 @@ import type {
 import {
   INVALID_MANIFEST_DIGEST,
   SERVICE_MANIFEST_FILE,
+  type ProbeDeclaration,
   type ProbeOutcome,
   type ProbeRunResult,
   type ServiceManifest,
 } from '../schema/service'
 import { loadServiceManifest } from '../service/manifest'
+import { apiContractDigest, parseOpenApiDocument } from '../service/contract'
 
 import { runServiceProbes } from '../service/runtime'
 import { canonicalJson } from '../reproduction/identity'
@@ -348,8 +350,38 @@ function invalidManifestPhase(
 }
 
 /**
+ * Per-probe definition identity (Doc 1 §2.3/§5 — instrument integrity): a
+ * canonical digest over the probe's PARSED declaration plus, for
+ * contract-sourced probes, the referenced OpenAPI document's digest. Compared
+ * across the compared states it decides whether the bound instrument is still
+ * the same one. null = the definition could not be resolved at this state
+ * (unreadable document) — unknown, never divergence, never novelty (the same
+ * M5b.1 null-digest discipline).
+ */
+async function probeDefinitionIdentity(
+  worktreeDir: string,
+  probe: ProbeDeclaration,
+): Promise<string | null> {
+  const ref = probe.expect.fromContract
+  let contractDigest: string | null = null
+  if (ref !== undefined) {
+    const text = await readFile(join(worktreeDir, ref.file), 'utf8').catch(() => null)
+    const doc = parseOpenApiDocument(text)
+    if (doc === null) {
+      return null
+    }
+    contractDigest = apiContractDigest(doc)
+  }
+  return `def_${createHash('sha256')
+    .update(canonicalJson({ declaration: probe, contract: contractDigest }), 'utf8')
+    .digest('hex')}`
+}
+
+/**
  * Execute one side's probes; a side with no usable manifest (absent while the
- * other side declares one) records an honest empty run instead.
+ * other side declares one) records an honest empty run instead. Every outcome
+ * is stamped with its declaration's definition identity so the Requirement
+ * Verification layer (Doc 1) can compare instrument identity across states.
  */
 async function runOneProbeSide(
   label: 'before' | 'after',
@@ -361,6 +393,15 @@ async function runOneProbeSide(
     return emptyProbeRun(label, ref, side)
   }
   const phase = await runServiceProbes({ cwd: worktreeDir, manifest: side.manifest })
+  // Every outcome belongs to a declared probe (undeclared-service and
+  // not-ready probes are recorded as unknown outcomes), so the identity map
+  // keyed by declaration id covers them all.
+  const identities = new Map<string, string | null>()
+  for (const probe of side.manifest.probes) {
+    if (!identities.has(probe.id)) {
+      identities.set(probe.id, await probeDefinitionIdentity(worktreeDir, probe))
+    }
+  }
   return {
     label,
     ref,
@@ -370,7 +411,10 @@ async function runOneProbeSide(
     // per probe via contractIdentity on each outcome — never this aggregate.
     contractDigest: aggregateContractDigest(phase.probes),
     servicesReady: phase.servicesReady,
-    probes: phase.probes,
+    probes: phase.probes.map((outcome) => ({
+      ...outcome,
+      definitionIdentity: identities.get(outcome.probeId) ?? null,
+    })),
     durationMs: phase.durationMs,
   }
 }

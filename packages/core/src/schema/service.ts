@@ -128,6 +128,15 @@ export const ProbeOutcomeSchema = z.object({
   expectation: z.enum(['inline', 'contract']).default('inline'),
   /** Present on contract-sourced probes: the per-probe contract identity (M5b.1 — the authoritative comparability unit). */
   contractIdentity: ContractIdentitySchema.optional(),
+  /**
+   * Per-probe definition identity (Doc 1 §2.3/§5): canonical digest of this
+   * probe's parsed declaration plus, for contract-sourced probes, the
+   * referenced OpenAPI document's digest. Compared across states to decide
+   * whether the instrument is the same one. null = the definition could not be
+   * resolved at this state (unreadable document) — unknown, never divergence,
+   * never novelty (the M5b.1 null-digest discipline).
+   */
+  definitionIdentity: z.string().nullable().optional(),
   httpStatus: z.number().int().nullable(),
   durationMs: z.number().int(),
   detail: z.string().optional(),

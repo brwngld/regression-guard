@@ -4,6 +4,7 @@ export {
   SensitiveCategorySchema,
   PathRuleSchema,
   AcceptanceCriterionSchema,
+  ExperimentReferenceSchema,
   FindingClassSchema,
   PolicyActionSchema,
   ContractPathsSchema,
@@ -16,6 +17,7 @@ export type {
   SensitiveCategory,
   PathRule,
   AcceptanceCriterion,
+  ExperimentReference,
   FindingClass,
   PolicyAction,
   ChangeContract,
@@ -48,6 +50,38 @@ export type { ScopeClassification, PathAssessment, ScopeAssessment } from './sch
 
 export { EvidenceSchema, EvidenceKindSchema, FindingSchema, severityForClass } from './schema/evidence'
 export type { Evidence, EvidenceKind, Finding } from './schema/evidence'
+
+export {
+  REQUIREMENT_SCHEMA_VERSION,
+  UnverifiedReasonSchema,
+  RequirementStatusSchema,
+  ExperimentResolutionSchema,
+  RequirementClauseResultSchema,
+  RequirementCoverageSchema,
+  RequirementVerificationSchema,
+} from './schema/requirement'
+export type {
+  UnverifiedReason,
+  RequirementStatus,
+  ExperimentResolution,
+  RequirementClauseResult,
+  RequirementCoverage,
+  RequirementVerification,
+} from './schema/requirement'
+
+export {
+  analyzeRequirements,
+  normalizeReferenceIdentity,
+  bindingSetsOfContract,
+} from './requirement/verify'
+export type {
+  RequirementInputs,
+  RequirementSideInputs,
+  RequirementTestSide,
+  RequirementProbeSide,
+  DefinitionDigestReader,
+  RequirementAnalysis,
+} from './requirement/verify'
 
 export { VerdictSchema, GateDecisionSchema } from './schema/gate'
 export type { Verdict, GateDecision } from './schema/gate'

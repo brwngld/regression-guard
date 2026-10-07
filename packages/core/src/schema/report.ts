@@ -5,6 +5,7 @@ import { VerdictSchema } from './gate'
 import { BaselineComparisonSchema } from './baseline'
 import { ImpactAssessmentSchema } from './impact'
 import { EvidencePackageSchema } from './repair'
+import { RequirementVerificationSchema } from './requirement'
 
 /** Reports carry an explicit schema version so consumers can evolve independently. */
 export const REPORT_SCHEMA_VERSION = 1
@@ -25,11 +26,11 @@ export type RegressionStatus = z.infer<typeof RegressionStatusSchema>
 
 export const ThreeQuestionsSchema = z.object({
   /**
-   * Deterministic M1 slice: did the diff touch every must-change area? This
-   * does NOT prove the requested feature works — only that every checkable
-   * required change area was touched. M2+ should aggregate actual acceptance
-   * evidence here rather than conflating "area changed" with "criterion
-   * satisfied".
+   * Deterministic slice: with zero acceptance clauses this is the structural
+   * must-change computation (touching is not achieving); when the contract
+   * declares acceptance clauses, requirement verification (Doc 1 §6) aggregates
+   * the real clause evidence instead — any FAILED -> no, all VERIFIED -> yes,
+   * otherwise partial (uncertainty, never inferred failure or success).
    */
   accomplished: z.enum(['yes', 'partial', 'no', 'unknown']),
   withinScope: z.enum(['yes', 'no', 'unknown']),
@@ -82,6 +83,8 @@ export const VerificationReportSchema = z.object({
   statistics: ReportStatisticsSchema,
   /** Present when regression verification ran (M2 Baseline Engine). */
   baseline: BaselineComparisonSchema.optional(),
+  /** Requirement verification (Doc 1) — present when the contract declares acceptance clauses. */
+  requirement: RequirementVerificationSchema.optional(),
   /** M3 impact intelligence — report-only, never gates. */
   impact: ImpactAssessmentSchema.optional(),
   /** M4 evidence package with repair proposal — emitted when findings exist. */

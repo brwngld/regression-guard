@@ -7,7 +7,16 @@ import { ReproductionAssessmentSchema } from './reproduction'
  * `dependency`; later milestones add test/runtime/browser/api observations
  * without redefining what an Evidence object is.
  */
-export const EvidenceKindSchema = z.enum(['diff', 'dependency', 'test', 'runtime', 'browser', 'api', 'api-contract'])
+export const EvidenceKindSchema = z.enum([
+  'diff',
+  'dependency',
+  'test',
+  'runtime',
+  'browser',
+  'api',
+  'api-contract',
+  'requirement',
+])
 export type EvidenceKind = z.infer<typeof EvidenceKindSchema>
 
 export const EvidenceSchema = z.object({
@@ -63,6 +72,9 @@ export function severityForClass(findingClass: FindingClass | string): 'info' | 
     case 'test-regression':
     case 'service-regression':
     case 'api-contract-regression':
+    // Doc 1 §6: a failed requirement is deterministic, evidence-backed proof
+    // that the required observable behavior does NOT hold.
+    case 'requirement-failed':
       return 'critical'
     case 'changed-dependency':
     case 'pre-existing-failure':
@@ -77,6 +89,16 @@ export function severityForClass(findingClass: FindingClass | string): 'info' | 
       // H2: shrunken executed coverage is a warning — real evidence loss, but
       // not a deterministic behavioral violation.
       return 'warn'
+    // Doc 1 §6: instrument tampering, binding drift, and incomplete requirement
+    // verification are decisions to re-authorize, not behavioral violations.
+    case 'requirement-experiment-modified':
+    case 'requirement-binding-changed':
+    case 'requirement-unverified':
+      return 'warn'
+    case 'experiment-new':
+      // Doc 1 §6/I9: an info signal only — it never gates and never counts
+      // toward VERIFIED.
+      return 'info'
     default:
       return 'warn'
   }

@@ -44,3 +44,47 @@ paths:
     expect(contract.paths.prohibited).toEqual([{ category: 'dependency-addition' }])
   })
 })
+
+describe('strict acceptance-clause schema (Doc 1 §2.5)', () => {
+  const contractWithAcceptance = (acceptance: string) =>
+    parseYaml(`version: 1
+id: x
+goal: g
+acceptance:
+${acceptance}`)
+
+  it('accepts every closed experiment-reference kind, including the reserved dom-flow', () => {
+    const contract = parseContract(
+      contractWithAcceptance(`  - id: REQ-001
+    description: d
+    experiments:
+      - kind: test
+        id: "a > b"
+      - kind: probe
+        probeId: health
+      - kind: dom-flow
+        flowId: f
+`),
+    )
+    expect(contract.acceptance[0]?.experiments).toEqual([
+      { kind: 'test', id: 'a > b' },
+      { kind: 'probe', probeId: 'health' },
+      { kind: 'dom-flow', flowId: 'f' },
+    ])
+  })
+
+  it('rejects unknown keys on a clause and inside an experiment reference', () => {
+    // A misspelled binding key on the clause itself must fail loudly.
+    expect(() =>
+      parseContract(contractWithAcceptance('  - id: REQ-001\n    description: d\n    experiment:\n      - kind: test\n        id: a')),
+    ).toThrow(/nrecognized/i)
+    // ...and so must an unknown key inside a reference (closed union).
+    expect(() =>
+      parseContract(contractWithAcceptance('  - id: REQ-001\n    description: d\n    experiments:\n      - kind: probe\n        probeId: health\n        manifestPath: other.yaml')),
+    ).toThrow(/nrecognized/i)
+    // An unknown KIND is a schema decision, never silently unbound.
+    expect(() =>
+      parseContract(contractWithAcceptance('  - id: REQ-001\n    description: d\n    experiments:\n      - kind: llm-check\n        prompt: does it work?')),
+    ).toThrow(/nvalid|nrecognized/i)
+  })
+})
