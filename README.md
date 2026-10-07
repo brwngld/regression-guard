@@ -112,7 +112,16 @@ Regression classification is conservative at every branch: PASS→PASS is
 preserved, PASS→FAIL is a regression (REJECT by default), FAIL→FAIL is
 pre-existing and never worsens the verdict alone, FAIL→PASS is an improvement,
 and missing or inconclusive executions report `partial` — never silently a
-pass.
+pass. Since the red-team hardening, partial verification also **gates** that
+way: `baseline-incomplete`, `test-command-changed`, and
+`test-coverage-reduced` (baseline test ids with no after outcome) default to
+REVIEW, never ACCEPT — if verification was attempted and became incomplete,
+a human decides; deliberate `--skip-tests` skips remain the operator's
+explicit choice. A contract policy override is the explicit authorization.
+One boundary is documented, not "solved": a test whose assertion is secretly
+weakened while keeping identical id/count/command is not deterministically
+detectable — the tripwire fixture in the suite asserts today's honest ACCEPT
+so no future heuristic quietly "fixes" it with guesswork.
 
 Service verification applies the exact same table to declared HTTP probes:
 commit a `regression-guard.services.yaml` declaring services (boot command +

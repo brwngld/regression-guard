@@ -54,6 +54,12 @@ export interface BaselineOptions {
   workingTreeChanges?: ChangeRecord[]
   /** Working-tree identity (base HEAD + dirty-state fingerprint) of the verified after state. */
   workingTree?: { baseSha: string; fingerprint: string }
+  /**
+   * Repo-relative paths the change DELETED (both modes). Used only to
+   * classify coverage loss as explained (the test file is gone) versus
+   * unexplained (the file exists but its ids no longer executed).
+   */
+  deletedPaths?: string[]
   timeoutMs: number
 }
 
@@ -173,6 +179,7 @@ export async function runBaselineVerification(options: BaselineOptions): Promise
       before: beforeResult,
       after: afterResult,
       probes,
+      deletedPaths: new Set((options.deletedPaths ?? []).map((path) => path.replace(/\\/g, '/'))),
     })
   } finally {
     await git.removeWorktree(beforeDir).catch(() => {})
@@ -530,6 +537,8 @@ interface ConcludeInput {
   after: TestRunResult
   /** M5 service-probe phase; absent when neither state declared a manifest. */
   probes?: ServicePhaseResult
+  /** Repo-relative deleted paths (forward slashes); explains coverage loss. */
+  deletedPaths: Set<string>
 }
 
 const conclude = (input: ConcludeInput): BaselineOutcome => {
@@ -639,6 +648,49 @@ const conclude = (input: ConcludeInput): BaselineOutcome => {
     })
   }
 
+  // H2 coverage signal: ONE grouped finding when per-test baseline ids have no
+  // after outcome at all — the executed coverage shrank, whatever the cause.
+  // Coverage is id-based: a rename that PRESERVES ids emits nothing (every
+  // before id still executed), and new-after ids are improvements, never
+  // flagged. Suite-fallback mode has no ids, so it never emits this finding
+  // (command-plan changes are already flagged by test-command-changed).
+  const missingAfter = perTest
+    ? transitions.filter((transition) => transition.after === 'missing')
+    : []
+  if (missingAfter.length > 0) {
+    // Explained loss: the before-id's test FILE is gone (a deletion in the
+    // change set — already flagged as deleted-test at scope level when
+    // unauthorized). Unexplained loss: the file is still present, so the id
+    // vanished from execution some other way.
+    const describeLoss = (transition: TestTransition): string => {
+      const file = transition.file?.replace(/\\/g, '/')
+      if (file !== undefined && input.deletedPaths.has(file)) {
+        return `"${transition.id}" in ${file} (file deleted — see the deleted-test scope finding)`
+      }
+      return `"${transition.id}"${file !== undefined ? ` in ${file}` : ''} (no matching after outcome — excluded, filtered, renamed beyond recognition, or runner configuration changed)`
+    }
+    findings.push({
+      id: 'TCOV-001',
+      findingClass: 'test-coverage-reduced',
+      severity: 'warn',
+      message: `Test coverage was reduced: ${missingAfter.length} baseline test id(s) have no outcome after the change: ${missingAfter.map((transition) => `"${transition.id}"`).join(', ')}.`,
+      paths: [
+        ...new Set(
+          missingAfter
+            .map((transition) => transition.file)
+            .filter((file): file is string => Boolean(file)),
+        ),
+      ],
+      evidence: {
+        kind: 'test',
+        claim: 'Test ids that existed at baseline produced no after outcome, so the behavior they verified is no longer checked — regardless of why they vanished.',
+        observation: `${experiment} Missing after outcomes: ${missingAfter.map(describeLoss).join('; ')}. Tests that only exist after the change are new coverage (improvements) and are not flagged.`,
+        changedLines: [],
+        reproduction: userCommand,
+      },
+    })
+  }
+
   // M5: the service-probe findings append to the test findings and flow
   // through the same gate (service-regression rejects by default).
   findings.push(...(input.probes?.findings ?? []))
@@ -701,6 +753,14 @@ const conclude = (input: ConcludeInput): BaselineOutcome => {
   }
   if (input.probes !== undefined) {
     incompleteReasons.push(...input.probes.status.incompleteReasons)
+  }
+
+  // H3 cross-reference: when coverage loss is among the reasons verification
+  // is incomplete, say so and point at the finding that carries the detail.
+  if (missingAfter.length > 0) {
+    incompleteReasons.push(
+      `${missingAfter.length} baseline test id(s) have no after outcome — coverage reduced (see TCOV-001)`,
+    )
   }
 
   if (status === 'partial' && incompleteReasons.length > 0) {

@@ -177,7 +177,8 @@ describe('M5: service verification', () => {
     const changed = report.findings.find((f) => f.findingClass === 'service-manifest-changed')
     expect(changed?.severity).toBe('info')
     expect(changed?.paths).toContain('regression-guard.services.yaml')
-    expect(report.verdict).toBe('ACCEPT')
+    // H1: partial verification no longer ACCEPTs by default (frozen spec).
+    expect(report.verdict).toBe('REVIEW')
     await repo.destroy()
   })
 })

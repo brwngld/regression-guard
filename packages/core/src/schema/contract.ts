@@ -62,6 +62,9 @@ export const FindingClassSchema = z.enum([
   // unparseable at a compared state, so the dependency diff is UNKNOWN.
   // Unknown is reported as unknown — never collapsed into removal findings.
   'dependency-state-unknown',
+  // H2 coverage signal: test ids that existed in the before baseline have no
+  // after outcome — the executed coverage shrank, whatever the cause.
+  'test-coverage-reduced',
 ])
 export type FindingClass = z.infer<typeof FindingClassSchema>
 

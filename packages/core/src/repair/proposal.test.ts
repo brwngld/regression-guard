@@ -41,6 +41,7 @@ const EXPECTED_OBJECTIVES: Record<FindingClass, string> = {
   'api-contract-changed': 'Reconcile the API specification change or re-authorize the contract baseline.',
   'service-manifest-invalid': 'Fix the invalid service manifest so verification can execute.',
   'dependency-state-unknown': 'Fix or restore the package manifest so dependency state can be compared.',
+  'test-coverage-reduced': 'Restore the removed test coverage or re-authorize the verification plan.',
 }
 
 function contractOf(paths: Record<string, unknown> = {}): ChangeContract {
